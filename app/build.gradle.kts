@@ -15,6 +15,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1"
+        // Real phones and the Apple-Silicon emulator are both arm64; keeping
+        // one ABI halves the WebRTC-laden APK for a lighter sideload.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
