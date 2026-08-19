@@ -54,8 +54,15 @@ class ConnectionManager(private val scope: CoroutineScope) {
     val bearer: String get() = token
 
     fun start(host: String, port: Int, token: String) {
+        // Calling start twice must never mean two sockets: a second live
+        // connection turns the daemon's fan-out into an echo of yourself.
+        val unchanged = this.host == host && this.port == port && this.token == token
+        if (wanted && unchanged && socket != null) return
         this.host = host; this.port = port; this.token = token
         wanted = true
+        retry?.cancel()
+        socket?.cancel()
+        socket = null
         open()
     }
 

@@ -87,11 +87,13 @@ fun parsePairPayload(raw: String): PairTarget? {
 }
 
 // One throwaway socket: open, present the token, wait for the daemon's
-// welcome. Proves the pairing before anything is saved.
+// welcome. Proves the pairing before anything is saved. The empty string is
+// the success sentinel — a null from the timeout wrapper must stay
+// distinguishable from a clean handshake.
 suspend fun trialConnect(target: PairTarget): String? {
     val client = OkHttpClient()
     val outcome = withTimeoutOrNull(6000) {
-        suspendCancellableCoroutine<String?> { cont ->
+        suspendCancellableCoroutine<String> { cont ->
             val request = Request.Builder()
                 .url("ws://" + target.host + ":" + target.port).build()
             val socket = client.newWebSocket(request, object : WebSocketListener() {
@@ -100,7 +102,7 @@ suspend fun trialConnect(target: PairTarget): String? {
                 }
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (text.contains("\"connected\"")) {
-                        if (cont.isActive) cont.resume(null)
+                        if (cont.isActive) cont.resume("")
                         webSocket.close(1000, "paired")
                     }
                 }
@@ -115,7 +117,11 @@ suspend fun trialConnect(target: PairTarget): String? {
             cont.invokeOnCancellation { socket.cancel() }
         }
     }
-    return outcome ?: "Timed out. Is the Mac awake and on the same network or tailnet?"
+    return when {
+        outcome == null -> "Timed out. Is the Mac awake and on the same network or tailnet?"
+        outcome.isEmpty() -> null
+        else -> outcome
+    }
 }
 
 @Composable
@@ -130,6 +136,9 @@ fun OnboardingFlow(
     onDone: () -> Unit
 ) {
     var step by remember { mutableStateOf(if (prefs.paired) "theme" else "pair") }
+    // Once paired, the wizard can already talk to the Mac: the theme step's
+    // "Match my Mac" and the hello's name both come from the live profile.
+    LaunchedEffect(step) { if (step != "pair") vm.connect() }
     Box(
         modifier = Modifier
             .fillMaxSize()

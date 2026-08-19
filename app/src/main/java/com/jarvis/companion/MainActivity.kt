@@ -53,6 +53,9 @@ class MainActivity : FragmentActivity() {
     private val locked = mutableStateOf(false)
     private val micGranted = mutableStateOf(false)
     private val scannedPayload = mutableStateOf<String?>(null)
+    // Mirrors prefs.onboarded as observable state: a plain property read
+    // inside setContent never invalidates the composition that read it.
+    private val ready = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,7 +75,8 @@ class MainActivity : FragmentActivity() {
         }
 
         locked.value = prefs.lockEnabled
-        if (prefs.paired && prefs.onboarded) vm.connect()
+        ready.value = prefs.paired && prefs.onboarded
+        if (ready.value) vm.connect()
 
         setContent {
             var screen by androidx.compose.runtime.remember {
@@ -83,7 +87,7 @@ class MainActivity : FragmentActivity() {
             }
             JarvisTheme(dark = resolveDark(themePref.value, vm.macTheme.value)) {
                 when {
-                    !prefs.onboarded || !prefs.paired -> OnboardingFlow(
+                    !ready.value -> OnboardingFlow(
                         vm = vm, prefs = prefs,
                         themePref = themePref,
                         canLock = canUseLock(),
@@ -92,6 +96,7 @@ class MainActivity : FragmentActivity() {
                         onTryLock = { promptUnlock(enrollProbe = true) },
                         onDone = {
                             prefs.onboarded = true
+                            ready.value = true
                             vm.connect()
                             screen = "chat"
                         })
