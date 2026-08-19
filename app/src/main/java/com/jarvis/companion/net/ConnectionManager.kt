@@ -65,7 +65,8 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private var direct: DirectLink? = null
     @Volatile private var via = ""
     private var dropped: CompletableDeferred<String>? = null
-    private var pairFailure = false
+    // Written from an OkHttp callback thread, read in the ladder coroutine.
+    @Volatile private var pairFailure = false
 
     private val reqCounter = AtomicLong(1)
     private val fileWaiters = HashMap<String, CompletableDeferred<Frames.Whole>>()
@@ -96,12 +97,17 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         via = ""
     }
 
+    private val hexSecret = Regex("[0-9a-fA-F]{64}")
+
     private suspend fun ladder() {
         while (wanted) {
             state.value = ConnState.Connecting
             if (host.isNotBlank() && attemptLan()) { awaitDrop(); continue }
             if (pairFailure) return
-            if (secret.length == 64 && attemptDirect()) { awaitDrop(); continue }
+            // A hand-typed secret that isn't 64 hex chars would throw inside
+            // HKDF; gate on shape, not just length, so a typo can't crash the
+            // rung — it just skips Direct and lands on the honest state.
+            if (hexSecret.matches(secret) && attemptDirect()) { awaitDrop(); continue }
             if (pairFailure) return
             state.value = ConnState.Unreachable("Mac unreachable — Telegram still works")
             delay(5000)

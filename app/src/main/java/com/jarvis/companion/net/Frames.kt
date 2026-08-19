@@ -63,7 +63,10 @@ object Frames {
     class Assembler {
         private data class Stream(val meta: kotlinx.serialization.json.JsonObject,
             val parts: ArrayList<ByteArray>, var bytes: Int, var next: Int)
-        private val streams = HashMap<String, Stream>()
+        // LinkedHashMap keeps insertion (age) order so the eldest half-done
+        // stream can be evicted; a sender never legitimately needs many open.
+        private val streams = LinkedHashMap<String, Stream>()
+        private val maxOpenStreams = 16
 
         fun accept(frame: ByteArray): Whole? {
             val decoded = decode(frame) ?: return null
@@ -71,6 +74,9 @@ object Frames {
             val key = decoded.tag.toString() + ":" + (decoded.header.int("sid") ?: return null)
             var stream = streams[key]
             if (seq == 0) {
+                while (streams.size >= maxOpenStreams && !streams.containsKey(key)) {
+                    streams.remove(streams.keys.first())
+                }
                 stream = Stream(decoded.header, ArrayList(), 0, 0)
                 streams[key] = stream
             }
