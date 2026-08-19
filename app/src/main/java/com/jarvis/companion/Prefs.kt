@@ -28,6 +28,9 @@ class Prefs(context: Context) {
     var token: String
         get() = store.getString("token", "") ?: ""
         set(value) = store.edit().putString("token", value).apply()
+    var secret: String
+        get() = store.getString("secret", "") ?: ""
+        set(value) = store.edit().putString("secret", value).apply()
     var theme: String
         get() = store.getString("theme", "system") ?: "system"
         set(value) = store.edit().putString("theme", value).apply()
@@ -44,7 +47,7 @@ class Prefs(context: Context) {
     val paired: Boolean get() = host.isNotBlank() && token.isNotBlank()
 
     fun forgetPairing() {
-        store.edit().remove("host").remove("port").remove("token")
+        store.edit().remove("host").remove("port").remove("token").remove("secret")
             .putBoolean("onboarded", false).apply()
     }
 }

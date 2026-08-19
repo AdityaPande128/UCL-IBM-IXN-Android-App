@@ -47,22 +47,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jarvis.companion.ChatViewModel
 import com.jarvis.companion.Prefs
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import kotlin.coroutines.resume
 
-data class PairTarget(val host: String, val port: Int, val token: String)
+data class PairTarget(val host: String, val port: Int, val token: String, val secret: String)
 
 // The QR carries {"host","port","token"}; a jarvis://pair URL works too, and
 // so do thumbs — everything can be typed by hand.
@@ -74,53 +69,45 @@ fun parsePairPayload(raw: String): PairTarget? {
             PairTarget(
                 host = parsed["host"]!!.jsonPrimitive.contentOrNull!!,
                 port = parsed["port"]?.jsonPrimitive?.intOrNull ?: 8080,
-                token = parsed["token"]!!.jsonPrimitive.contentOrNull!!)
+                token = parsed["token"]!!.jsonPrimitive.contentOrNull!!,
+                secret = parsed["secret"]?.jsonPrimitive?.contentOrNull ?: "")
         }.getOrNull()
     }
     if (text.startsWith("jarvis://")) {
         val uri = Uri.parse(text)
         val host = uri.getQueryParameter("host") ?: return null
         val token = uri.getQueryParameter("token") ?: return null
-        return PairTarget(host, uri.getQueryParameter("port")?.toIntOrNull() ?: 8080, token)
+        return PairTarget(host, uri.getQueryParameter("port")?.toIntOrNull() ?: 8080,
+            token, uri.getQueryParameter("secret") ?: "")
     }
     return null
 }
 
-// One throwaway socket: open, present the token, wait for the daemon's
-// welcome. Proves the pairing before anything is saved. The empty string is
-// the success sentinel — a null from the timeout wrapper must stay
-// distinguishable from a clean handshake.
-suspend fun trialConnect(target: PairTarget): String? {
-    val client = OkHttpClient()
-    val outcome = withTimeoutOrNull(6000) {
-        suspendCancellableCoroutine<String> { cont ->
-            val request = Request.Builder()
-                .url("ws://" + target.host + ":" + target.port).build()
-            val socket = client.newWebSocket(request, object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    webSocket.send("{\"type\":\"auth\",\"token\":\"" + target.token + "\"}")
-                }
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (text.contains("\"connected\"")) {
-                        if (cont.isActive) cont.resume("")
-                        webSocket.close(1000, "paired")
-                    }
-                }
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (cont.isActive) cont.resume(
-                        if (code == 4401) "The Mac refused this token." else "Connection closed early.")
-                }
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (cont.isActive) cont.resume("Could not reach the Mac: " + (t.message ?: "unknown"))
-                }
-            })
-            cont.invokeOnCancellation { socket.cancel() }
+// The trial climbs the same ladder the app lives on: LAN first, then a
+// punched channel. Passing proves the pairing end to end before saving.
+suspend fun trialConnect(context: android.content.Context, target: PairTarget): String? {
+    val scope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
+    val probe = com.jarvis.companion.net.ConnectionManager(scope, context.applicationContext)
+    return try {
+        probe.start(target.host, target.port, target.token, target.secret)
+        val outcome = withTimeoutOrNull(30000) {
+            probe.state.first { state ->
+                state is com.jarvis.companion.net.ConnState.Live
+                    || state is com.jarvis.companion.net.ConnState.PairRequired
+                    || state is com.jarvis.companion.net.ConnState.Unreachable
+            }
         }
-    }
-    return when {
-        outcome == null -> "Timed out. Is the Mac awake and on the same network or tailnet?"
-        outcome.isEmpty() -> null
-        else -> outcome
+        when (outcome) {
+            is com.jarvis.companion.net.ConnState.Live -> null
+            is com.jarvis.companion.net.ConnState.PairRequired -> "The Mac refused this token."
+            is com.jarvis.companion.net.ConnState.Unreachable ->
+                "Could not reach the Mac on Wi-Fi or by hole punch. Is it awake?"
+            else -> "Timed out. Is the Mac awake?"
+        }
+    } finally {
+        probe.stop()
+        scope.cancel()
     }
 }
 
@@ -182,6 +169,8 @@ private fun PairStep(
     var host by remember { mutableStateOf(prefs.host) }
     var port by remember { mutableStateOf(prefs.port.toString()) }
     var token by remember { mutableStateOf(prefs.token) }
+    var secret by remember { mutableStateOf(prefs.secret) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     var checking by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -192,6 +181,7 @@ private fun PairStep(
         val target = parsePairPayload(raw)
         if (target == null) { error = "That code isn't a Jarvis pairing code."; return@LaunchedEffect }
         host = target.host; port = target.port.toString(); token = target.token
+        secret = target.secret
     }
 
     StepFrame("Pair with your Mac",
@@ -208,6 +198,9 @@ private fun PairStep(
         OutlinedTextField(value = token, onValueChange = { token = it.trim() },
             label = { Text("Pairing token") },
             singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+        OutlinedTextField(value = secret, onValueChange = { secret = it.trim() },
+            label = { Text("Direct secret (for away-from-home)") },
+            singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
         if (error != null) {
             Text(error!!, color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
@@ -220,13 +213,15 @@ private fun PairStep(
                 onClick = {
                     checking = true; error = null
                     scope.launch {
-                        val target = PairTarget(host.trim(), port.toIntOrNull() ?: 8080, token)
-                        val failure = trialConnect(target)
+                        val target = PairTarget(host.trim(), port.toIntOrNull() ?: 8080,
+                            token, secret)
+                        val failure = trialConnect(context, target)
                         checking = false
                         if (failure != null) { error = failure; return@launch }
                         prefs.host = target.host
                         prefs.port = target.port
                         prefs.token = target.token
+                        prefs.secret = target.secret
                         onNext()
                     }
                 }) { Text(if (checking) "Checking…" else "Connect") }

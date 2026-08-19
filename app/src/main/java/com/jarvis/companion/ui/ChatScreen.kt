@@ -71,9 +71,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun ConnectionPill(state: ConnState) {
     val (label, color) = when (state) {
-        is ConnState.Live -> "Connected" to MaterialTheme.colorScheme.primary
+        is ConnState.Live -> (if (state.via == "direct") "Connected · Direct" else "Connected") to
+            MaterialTheme.colorScheme.primary
         is ConnState.Connecting -> "Connecting…" to MaterialTheme.colorScheme.onSurfaceVariant
         is ConnState.PairRequired -> "Re-pair needed" to MaterialTheme.colorScheme.error
+        is ConnState.Unreachable -> "Unreachable — Telegram still works" to
+            MaterialTheme.colorScheme.error
         else -> "Mac unreachable" to MaterialTheme.colorScheme.error
     }
     Row(verticalAlignment = Alignment.CenterVertically,

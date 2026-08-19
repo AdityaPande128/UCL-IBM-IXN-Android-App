@@ -1,37 +1,48 @@
 package com.jarvis.companion.net
 
+import android.content.Context
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 sealed class ConnState {
     data object Disconnected : ConnState()
     data object Connecting : ConnState()
-    data object Live : ConnState()
+    data class Live(val via: String) : ConnState()
+    data class Unreachable(val hint: String) : ConnState()
     data class PairRequired(val reason: String) : ConnState()
 }
 
-// One websocket to the Mac, kept honest: a ping every 20 s so cellular can't
-// hold a dead socket open, a flat 3 s retry like the Mac client, and a 4401
-// treated as "re-pair", never retried into a loop.
-class ConnectionManager(private val scope: CoroutineScope) {
+data class FetchedFile(val status: Int, val name: String, val mime: String, val bytes: ByteArray)
+
+// The transport ladder: same Wi-Fi first, then a hole punched straight home
+// from anywhere, and when a hostile network defeats both, an honest state —
+// Telegram still works. Everything above sees one connection either way.
+class ConnectionManager(private val scope: CoroutineScope, private val appContext: Context) {
 
     private val json = Json { ignoreUnknownKeys = true }
     private val client = OkHttpClient.Builder()
@@ -43,90 +54,244 @@ class ConnectionManager(private val scope: CoroutineScope) {
     val events = MutableSharedFlow<JsonObject>(extraBufferCapacity = 256)
     val audio = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
 
-    private var socket: WebSocket? = null
-    private var wanted = false
-    private var retry: Job? = null
     private var host = ""
     private var port = 8080
     private var token = ""
+    private var secret = ""
+    @Volatile private var wanted = false
+    private var supervisor: Job? = null
 
-    val httpBase: String get() = "http://" + host + ":" + port
-    val bearer: String get() = token
+    private var lanSocket: WebSocket? = null
+    private var direct: DirectLink? = null
+    @Volatile private var via = ""
+    private var dropped: CompletableDeferred<String>? = null
+    private var pairFailure = false
 
-    fun start(host: String, port: Int, token: String) {
-        // Calling start twice must never mean two sockets: a second live
-        // connection turns the daemon's fan-out into an echo of yourself.
-        val unchanged = this.host == host && this.port == port && this.token == token
-        if (wanted && unchanged && socket != null) return
-        this.host = host; this.port = port; this.token = token
+    private val reqCounter = AtomicLong(1)
+    private val fileWaiters = HashMap<String, CompletableDeferred<Frames.Whole>>()
+
+    fun start(host: String, port: Int, token: String, secret: String) {
+        val unchanged = this.host == host && this.port == port
+            && this.token == token && this.secret == secret
+        if (wanted && unchanged && supervisor?.isActive == true) return
+        stop()
+        this.host = host; this.port = port; this.token = token; this.secret = secret
         wanted = true
-        retry?.cancel()
-        socket?.cancel()
-        socket = null
-        open()
+        pairFailure = false
+        supervisor = scope.launch { ladder() }
     }
 
     fun stop() {
         wanted = false
-        retry?.cancel()
-        socket?.close(1000, "bye")
-        socket = null
+        supervisor?.cancel()
+        closeLinks()
         state.value = ConnState.Disconnected
     }
 
-    private fun open() {
+    private fun closeLinks() {
+        runCatching { lanSocket?.close(1000, "bye") }
+        lanSocket = null
+        direct?.close()
+        direct = null
+        via = ""
+    }
+
+    private suspend fun ladder() {
+        while (wanted) {
+            state.value = ConnState.Connecting
+            if (host.isNotBlank() && attemptLan()) { awaitDrop(); continue }
+            if (pairFailure) return
+            if (secret.length == 64 && attemptDirect()) { awaitDrop(); continue }
+            if (pairFailure) return
+            state.value = ConnState.Unreachable("Mac unreachable — Telegram still works")
+            delay(5000)
+        }
+    }
+
+    private suspend fun awaitDrop() {
+        val reason = dropped?.await() ?: return
+        closeLinks()
         if (!wanted) return
-        state.value = ConnState.Connecting
-        val request = Request.Builder().url("ws://" + host + ":" + port).build()
-        socket = client.newWebSocket(request, object : WebSocketListener() {
+        state.value = ConnState.Disconnected
+        delay(3000)
+    }
+
+    private fun markLive(mode: String) {
+        via = mode
+        state.value = ConnState.Live(mode)
+    }
+
+    private fun handleText(text: String) {
+        val parsed = runCatching { json.parseToJsonElement(text) as? JsonObject }
+            .getOrNull() ?: return
+        if (parsed["type"]?.jsonPrimitive?.contentOrNull == "connected" && via.isNotEmpty()) {
+            state.value = ConnState.Live(via)
+        }
+        events.tryEmit(parsed)
+    }
+
+    // Rung one: the plain websocket, when the Mac is a room away.
+    private suspend fun attemptLan(): Boolean {
+        val ready = CompletableDeferred<Boolean>()
+        val drop = CompletableDeferred<String>()
+        val request = Request.Builder().url("ws://$host:$port").build()
+        val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                via = "lan"
                 webSocket.send(buildJsonObject {
-                    put("type", kotlinx.serialization.json.JsonPrimitive("auth"))
-                    put("token", kotlinx.serialization.json.JsonPrimitive(token))
+                    put("type", JsonPrimitive("auth"))
+                    put("token", JsonPrimitive(token))
                 }.toString())
             }
-
             override fun onMessage(webSocket: WebSocket, text: String) {
-                val parsed = runCatching { json.parseToJsonElement(text) as? JsonObject }
-                    .getOrNull() ?: return
-                val type = parsed["type"]?.jsonPrimitive?.contentOrNull
-                if (type == "connected") state.value = ConnState.Live
-                events.tryEmit(parsed)
+                handleText(text)
+                if (state.value is ConnState.Live) ready.complete(true)
             }
-
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 audio.tryEmit(bytes.toByteArray())
             }
-
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                handleDown(code)
+                if (code == 4401) {
+                    pairFailure = true
+                    wanted = false
+                    state.value = ConnState.PairRequired("The Mac refused this pairing.")
+                }
+                ready.complete(false)
+                drop.complete("closed $code")
             }
-
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                handleDown(null)
+                ready.complete(false)
+                drop.complete(t.message ?: "failed")
             }
         })
+        lanSocket = socket
+        dropped = drop
+        val live = withTimeoutOrNull(5000) { ready.await() } == true
+        if (!live) { runCatching { socket.cancel() }; lanSocket = null }
+        return live
     }
 
-    private fun handleDown(code: Int?) {
-        socket = null
-        if (code == 4401) {
-            wanted = false
-            state.value = ConnState.PairRequired("The Mac refused this pairing.")
-            return
+    // Rung two: the hole punch. Signaling is sealed with the pairing secret;
+    // the channel is direct; the daemon still demands the token afterwards.
+    private suspend fun attemptDirect(): Boolean {
+        val ready = CompletableDeferred<Boolean>()
+        val drop = CompletableDeferred<String>()
+        val link = DirectLink(
+            appContext, scope, secret,
+            onOpen = {
+                via = "direct"
+                sendRaw(buildJsonObject {
+                    put("type", JsonPrimitive("auth"))
+                    put("token", JsonPrimitive(token))
+                }.toString())
+            },
+            onText = { text ->
+                handleText(text)
+                if (state.value is ConnState.Live) ready.complete(true)
+            },
+            onBinary = { bytes -> audio.tryEmit(bytes) },
+            onClosed = {
+                ready.complete(false)
+                drop.complete("channel closed")
+            })
+        direct = link
+        dropped = drop
+        link.onFileResponse = { whole ->
+            val reqId = whole.meta.str("reqId")
+            val waiter = synchronized(fileWaiters) { reqId?.let { fileWaiters.remove(it) } }
+            waiter?.complete(whole)
         }
-        if (!wanted) { state.value = ConnState.Disconnected; return }
-        state.value = ConnState.Disconnected
-        retry?.cancel()
-        retry = scope.launch {
-            delay(3000)
-            open()
-        }
+        link.connect(appContext)
+        val live = withTimeoutOrNull(25000) { ready.await() } == true
+        if (!live) { link.close(); direct = null }
+        return live
     }
 
-    fun send(payload: JsonObject): Boolean =
-        socket?.send(payload.toString()) ?: false
+    private fun sendRaw(text: String): Boolean = when (via) {
+        "lan" -> lanSocket?.send(text) ?: false
+        "direct" -> direct?.sendText(text) ?: false
+        else -> false
+    }
 
-    fun sendBinary(bytes: ByteArray): Boolean =
-        socket?.send(bytes.toByteString()) ?: false
+    fun send(payload: JsonObject): Boolean = sendRaw(payload.toString())
+
+    fun sendBinary(bytes: ByteArray): Boolean = when (via) {
+        "lan" -> lanSocket?.send(bytes.toByteString()) ?: false
+        "direct" -> direct?.sendWsBinary(bytes) ?: false
+        else -> false
+    }
+
+    // The file lane rides HTTP on the LAN and framed channel messages when
+    // punched through — same daemon routes, same caps, either way.
+    suspend fun uploadFile(name: String, bytes: ByteArray): JsonObject =
+        withContext(Dispatchers.IO) {
+            if (via == "direct") {
+                val whole = fileRoundTrip(buildJsonObject {
+                    put("op", JsonPrimitive("put"))
+                    put("name", JsonPrimitive(name))
+                }, bytes) ?: throw IllegalStateException("no reply from the Mac")
+                val status = whole.meta.int("status") ?: 0
+                val body = whole.meta.str("json") ?: "{}"
+                if (status != 200) throw IllegalStateException("upload refused ($status)")
+                (Json.parseToJsonElement(body) as? JsonObject)
+                    ?: throw IllegalStateException("malformed reply")
+            } else {
+                val request = Request.Builder()
+                    .url("http://$host:$port/files")
+                    .header("Authorization", "Bearer $token")
+                    .header("x-filename", android.net.Uri.encode(name))
+                    .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful)
+                        throw IllegalStateException("upload refused (${response.code})")
+                    (Json.parseToJsonElement(response.body?.string() ?: "{}") as? JsonObject)
+                        ?: throw IllegalStateException("malformed reply")
+                }
+            }
+        }
+
+    suspend fun downloadFile(id: String, name: String): FetchedFile =
+        withContext(Dispatchers.IO) {
+            if (via == "direct") {
+                val whole = fileRoundTrip(buildJsonObject {
+                    put("op", JsonPrimitive("get"))
+                    put("id", JsonPrimitive(id))
+                }, ByteArray(0)) ?: throw IllegalStateException("no reply from the Mac")
+                FetchedFile(
+                    status = whole.meta.int("status") ?: 0,
+                    name = name,
+                    mime = whole.meta.str("mime") ?: "application/octet-stream",
+                    bytes = whole.body)
+            } else {
+                val request = Request.Builder()
+                    .url("http://$host:$port/files/$id")
+                    .header("Authorization", "Bearer $token")
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    FetchedFile(
+                        status = response.code,
+                        name = name,
+                        mime = response.header("Content-Type") ?: "application/octet-stream",
+                        bytes = response.body?.bytes() ?: ByteArray(0))
+                }
+            }
+        }
+
+    private suspend fun fileRoundTrip(meta: JsonObject, body: ByteArray): Frames.Whole? {
+        val link = direct ?: return null
+        val reqId = "r" + reqCounter.getAndIncrement()
+        val waiter = CompletableDeferred<Frames.Whole>()
+        synchronized(fileWaiters) { fileWaiters[reqId] = waiter }
+        val stamped = buildJsonObject {
+            meta.forEach { (k, v) -> put(k, v) }
+            put("reqId", JsonPrimitive(reqId))
+        }
+        if (!link.sendFileRequest(stamped, body)) {
+            synchronized(fileWaiters) { fileWaiters.remove(reqId) }
+            return null
+        }
+        return withTimeoutOrNull(60000) { waiter.await() }
+            .also { if (it == null) synchronized(fileWaiters) { fileWaiters.remove(reqId) } }
+    }
 }

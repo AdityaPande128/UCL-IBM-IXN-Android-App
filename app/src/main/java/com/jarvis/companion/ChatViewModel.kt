@@ -31,10 +31,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.UUID
 
 data class ChatItem(
@@ -74,10 +70,9 @@ val KOKORO_VOICES = listOf(
 class ChatViewModel(private val app: Application, private val prefs: Prefs) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    val conn = ConnectionManager(scope)
+    val conn = ConnectionManager(scope, app)
     private val speaker = Speaker(app, scope)
     private val recorder = Recorder()
-    private val http = OkHttpClient()
 
     val items = mutableStateListOf<ChatItem>()
     val conversations = mutableStateListOf<ConvRow>()
@@ -106,7 +101,7 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
     }
 
     fun connect() {
-        if (prefs.paired) conn.start(prefs.host, prefs.port, prefs.token)
+        if (prefs.paired) conn.start(prefs.host, prefs.port, prefs.token, prefs.secret)
     }
 
     private fun afterConnect() {
@@ -303,22 +298,10 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
                 } ?: "upload"
                 val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: throw IllegalStateException("could not read the file")
-                val request = Request.Builder()
-                    .url(conn.httpBase + "/files")
-                    .header("Authorization", "Bearer " + conn.bearer)
-                    .header("x-filename", Uri.encode(name))
-                    .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
-                    .build()
-                http.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw IllegalStateException(
-                        "upload refused (" + response.code + ")")
-                    val body = response.body?.string() ?: "{}"
-                    val parsed = kotlinx.serialization.json.Json
-                        .parseToJsonElement(body) as JsonObject
-                    val id = parsed.str("id") ?: throw IllegalStateException("no id back")
-                    withContext(Dispatchers.Main) {
-                        pendingUploads.add(PendingUpload(id, parsed.str("name") ?: name))
-                    }
+                val reply = conn.uploadFile(name, bytes)
+                val id = reply.str("id") ?: throw IllegalStateException("no id back")
+                withContext(Dispatchers.Main) {
+                    pendingUploads.add(PendingUpload(id, reply.str("name") ?: name))
                 }
             } catch (err: Exception) {
                 withContext(Dispatchers.Main) { toast.value = "Upload failed: " + err.message }
@@ -330,32 +313,25 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
         val id = file.id ?: run { toast.value = "That file has no handle."; return }
         scope.launch(Dispatchers.IO) {
             try {
-                val request = Request.Builder()
-                    .url(conn.httpBase + "/files/" + id)
-                    .header("Authorization", "Bearer " + conn.bearer)
-                    .build()
-                http.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw IllegalStateException(
-                        "fetch refused (" + response.code + ")")
-                    val bytes = response.body?.bytes() ?: ByteArray(0)
-                    val mime = response.header("Content-Type") ?: "application/octet-stream"
-                    if (mime.startsWith("image/")) {
-                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (bitmap != null) withContext(Dispatchers.Main) {
-                            imagePreviews[id] = bitmap
-                        }
+                val fetched = conn.downloadFile(id, file.name)
+                if (fetched.status != 200) throw IllegalStateException(
+                    "fetch refused (" + fetched.status + ")")
+                if (fetched.mime.startsWith("image/")) {
+                    val bitmap = BitmapFactory.decodeByteArray(fetched.bytes, 0, fetched.bytes.size)
+                    if (bitmap != null) withContext(Dispatchers.Main) {
+                        imagePreviews[id] = bitmap
                     }
-                    val uri = saveToDownloads(file.name, mime, bytes)
-                    withContext(Dispatchers.Main) {
-                        toast.value = "Saved " + file.name
-                        if (open && uri != null && !mime.startsWith("image/")) {
-                            val view = Intent(Intent.ACTION_VIEW)
-                                .setDataAndType(uri, mime)
-                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                    or Intent.FLAG_ACTIVITY_NEW_TASK)
-                            runCatching { app.startActivity(Intent.createChooser(view, file.name)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                        }
+                }
+                val uri = saveToDownloads(file.name, fetched.mime, fetched.bytes)
+                withContext(Dispatchers.Main) {
+                    toast.value = "Saved " + file.name
+                    if (open && uri != null && !fetched.mime.startsWith("image/")) {
+                        val view = Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(uri, fetched.mime)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                or Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { app.startActivity(Intent.createChooser(view, file.name)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                     }
                 }
             } catch (err: Exception) {
