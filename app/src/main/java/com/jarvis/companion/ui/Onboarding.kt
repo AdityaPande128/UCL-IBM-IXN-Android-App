@@ -57,7 +57,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
-data class PairTarget(val host: String, val port: Int, val token: String, val secret: String)
+data class PairTarget(val host: String, val port: Int, val token: String, val secret: String,
+    val turn: String = "")
 
 // The QR carries {"host","port","token"}; a jarvis://pair URL works too, and
 // so do thumbs — everything can be typed by hand.
@@ -70,7 +71,8 @@ fun parsePairPayload(raw: String): PairTarget? {
                 host = parsed["host"]!!.jsonPrimitive.contentOrNull!!,
                 port = parsed["port"]?.jsonPrimitive?.intOrNull ?: 8080,
                 token = parsed["token"]!!.jsonPrimitive.contentOrNull!!,
-                secret = parsed["secret"]?.jsonPrimitive?.contentOrNull ?: "")
+                secret = parsed["secret"]?.jsonPrimitive?.contentOrNull ?: "",
+                turn = parsed["turn"]?.jsonPrimitive?.contentOrNull ?: "")
         }.getOrNull()
     }
     if (text.startsWith("jarvis://")) {
@@ -78,7 +80,7 @@ fun parsePairPayload(raw: String): PairTarget? {
         val host = uri.getQueryParameter("host") ?: return null
         val token = uri.getQueryParameter("token") ?: return null
         return PairTarget(host, uri.getQueryParameter("port")?.toIntOrNull() ?: 8080,
-            token, uri.getQueryParameter("secret") ?: "")
+            token, uri.getQueryParameter("secret") ?: "", uri.getQueryParameter("turn") ?: "")
     }
     return null
 }
@@ -90,7 +92,7 @@ suspend fun trialConnect(context: android.content.Context, target: PairTarget): 
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
     val probe = com.jarvis.companion.net.ConnectionManager(scope, context.applicationContext)
     return try {
-        probe.start(target.host, target.port, target.token, target.secret)
+        probe.start(target.host, target.port, target.token, target.secret, target.turn)
         val outcome = withTimeoutOrNull(30000) {
             probe.state.first { state ->
                 state is com.jarvis.companion.net.ConnState.Live
@@ -170,6 +172,9 @@ private fun PairStep(
     var port by remember { mutableStateOf(prefs.port.toString()) }
     var token by remember { mutableStateOf(prefs.token) }
     var secret by remember { mutableStateOf(prefs.secret) }
+    // Rides the QR invisibly: relay addresses are configuration, not something
+    // anyone should ever type on a phone.
+    var turn by remember { mutableStateOf(prefs.turn) }
     val context = androidx.compose.ui.platform.LocalContext.current
     var checking by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -182,6 +187,7 @@ private fun PairStep(
         if (target == null) { error = "That code isn't a Jarvis pairing code."; return@LaunchedEffect }
         host = target.host; port = target.port.toString(); token = target.token
         secret = target.secret
+        turn = target.turn
     }
 
     StepFrame("Pair with your Mac",
@@ -214,7 +220,7 @@ private fun PairStep(
                     checking = true; error = null
                     scope.launch {
                         val target = PairTarget(host.trim(), port.toIntOrNull() ?: 8080,
-                            token, secret)
+                            token, secret, turn)
                         val failure = trialConnect(context, target)
                         checking = false
                         if (failure != null) { error = failure; return@launch }
@@ -222,6 +228,7 @@ private fun PairStep(
                         prefs.port = target.port
                         prefs.token = target.token
                         prefs.secret = target.secret
+                        prefs.turn = target.turn
                         onNext()
                     }
                 }) { Text(if (checking) "Checking…" else "Connect") }

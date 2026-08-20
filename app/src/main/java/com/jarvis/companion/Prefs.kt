@@ -31,6 +31,9 @@ class Prefs(context: Context) {
     var secret: String
         get() = store.getString("secret", "") ?: ""
         set(value) = store.edit().putString("secret", value).apply()
+    var turn: String
+        get() = store.getString("turn", "") ?: ""
+        set(value) = store.edit().putString("turn", value).apply()
     var theme: String
         get() = store.getString("theme", "system") ?: "system"
         set(value) = store.edit().putString("theme", value).apply()
@@ -48,6 +51,6 @@ class Prefs(context: Context) {
 
     fun forgetPairing() {
         store.edit().remove("host").remove("port").remove("token").remove("secret")
-            .putBoolean("onboarded", false).apply()
+            .remove("turn").putBoolean("onboarded", false).apply()
     }
 }

@@ -58,6 +58,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private var port = 8080
     private var token = ""
     private var secret = ""
+    private var turn = ""
     @Volatile private var wanted = false
     private var supervisor: Job? = null
 
@@ -71,12 +72,13 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private val reqCounter = AtomicLong(1)
     private val fileWaiters = HashMap<String, CompletableDeferred<Frames.Whole>>()
 
-    fun start(host: String, port: Int, token: String, secret: String) {
+    fun start(host: String, port: Int, token: String, secret: String, turn: String = "") {
         val unchanged = this.host == host && this.port == port
-            && this.token == token && this.secret == secret
+            && this.token == token && this.secret == secret && this.turn == turn
         if (wanted && unchanged && supervisor?.isActive == true) return
         stop()
         this.host = host; this.port = port; this.token = token; this.secret = secret
+        this.turn = turn
         wanted = true
         pairFailure = false
         supervisor = scope.launch { ladder() }
@@ -183,7 +185,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         val ready = CompletableDeferred<Boolean>()
         val drop = CompletableDeferred<String>()
         val link = DirectLink(
-            appContext, scope, secret,
+            appContext, scope, secret, turn,
             onOpen = {
                 via = "direct"
                 sendRaw(buildJsonObject {

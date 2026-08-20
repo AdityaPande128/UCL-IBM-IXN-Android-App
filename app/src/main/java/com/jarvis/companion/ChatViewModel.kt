@@ -101,7 +101,7 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
     }
 
     fun connect() {
-        if (prefs.paired) conn.start(prefs.host, prefs.port, prefs.token, prefs.secret)
+        if (prefs.paired) conn.start(prefs.host, prefs.port, prefs.token, prefs.secret, prefs.turn)
     }
 
     private fun afterConnect() {

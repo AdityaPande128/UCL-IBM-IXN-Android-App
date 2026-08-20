@@ -22,6 +22,7 @@ class DirectLink(
     context: Context,
     scope: CoroutineScope,
     secretHex: String,
+    private val turnUris: String = "",
     private val onOpen: () -> Unit,
     private val onText: (String) -> Unit,
     private val onBinary: (ByteArray) -> Unit,
@@ -68,10 +69,22 @@ class DirectLink(
         // Listen before speaking: the Mac answers within a second, and an
         // offer published before our stream is up loses that answer forever.
         signaling.start()
-        val stun = listOf(
+        val servers = mutableListOf(
             PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
             PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer())
-        val config = PeerConnection.RTCConfiguration(stun).apply {
+        // Relay entries come through the pairing QR as turn:user:pass@host:port
+        // URIs — the rung that still connects when the punch cannot land.
+        for (uri in turnUris.split(',')) {
+            val trimmed = uri.trim()
+            if (trimmed.isEmpty()) continue
+            val m = Regex("^(turns?):([^:@]+):([^@]+)@(.+)$").find(trimmed)
+            servers += if (m != null) {
+                val (scheme, user, pass, rest) = m.destructured
+                PeerConnection.IceServer.builder("$scheme:$rest")
+                    .setUsername(user).setPassword(pass).createIceServer()
+            } else PeerConnection.IceServer.builder(trimmed).createIceServer()
+        }
+        val config = PeerConnection.RTCConfiguration(servers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
         }
         val peer = sharedFactory(context).createPeerConnection(config,
