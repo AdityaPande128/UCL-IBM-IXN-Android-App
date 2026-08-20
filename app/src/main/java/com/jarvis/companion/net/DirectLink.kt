@@ -55,8 +55,17 @@ class DirectLink(
             "candidate" -> signal.str("candidate")?.let { candidate ->
                 pc?.addIceCandidate(IceCandidate(signal.str("mid") ?: "0", 0, candidate))
             }
+            // The Mac announcing its router's mapped door: a fully direct
+            // TCP path for when the punch cannot land.
+            "endpoint" -> {
+                val host = signal.str("host")
+                val port = signal.int("port")
+                if (host != null && port != null) onEndpoint?.invoke(host, port)
+            }
         }
     }
+
+    var onEndpoint: ((String, Int) -> Unit)? = null
 
     private val sdpObserver = object : SdpObserver {
         override fun onCreateSuccess(desc: SessionDescription) {}

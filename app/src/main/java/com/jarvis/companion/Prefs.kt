@@ -34,6 +34,14 @@ class Prefs(context: Context) {
     var turn: String
         get() = store.getString("turn", "") ?: ""
         set(value) = store.edit().putString("turn", value).apply()
+    // The home router's mapped door, learned over sealed signaling and kept
+    // for the next time the Mac is far away.
+    var endpointHost: String
+        get() = store.getString("endpoint-host", "") ?: ""
+        set(value) = store.edit().putString("endpoint-host", value).apply()
+    var endpointPort: Int
+        get() = store.getInt("endpoint-port", 0)
+        set(value) = store.edit().putInt("endpoint-port", value).apply()
     var theme: String
         get() = store.getString("theme", "system") ?: "system"
         set(value) = store.edit().putString("theme", value).apply()
@@ -51,7 +59,8 @@ class Prefs(context: Context) {
 
     fun forgetPairing() {
         store.edit().remove("host").remove("port").remove("token").remove("secret")
-            .remove("turn").putBoolean("onboarded", false).apply()
+            .remove("turn").remove("endpoint-host").remove("endpoint-port")
+            .putBoolean("onboarded", false).apply()
     }
 
     // Sign-out is total: pairing, settings, everything — the phone returns

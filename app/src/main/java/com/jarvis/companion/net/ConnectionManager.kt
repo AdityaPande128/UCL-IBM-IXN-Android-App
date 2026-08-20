@@ -59,6 +59,11 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private var token = ""
     private var secret = ""
     private var turn = ""
+    private val prefs = com.jarvis.companion.Prefs(appContext)
+    // The home router's mapped door, learned over sealed signaling; written
+    // from the signaling thread, read in the ladder coroutine.
+    @Volatile private var endpointHost = ""
+    @Volatile private var endpointPort = 0
     @Volatile private var wanted = false
     private var supervisor: Job? = null
 
@@ -79,6 +84,8 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         stop()
         this.host = host; this.port = port; this.token = token; this.secret = secret
         this.turn = turn
+        endpointHost = prefs.endpointHost
+        endpointPort = prefs.endpointPort
         wanted = true
         pairFailure = false
         supervisor = scope.launch { ladder() }
@@ -104,12 +111,25 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private suspend fun ladder() {
         while (wanted) {
             state.value = ConnState.Connecting
-            if (host.isNotBlank() && attemptLan()) { awaitDrop(); continue }
+            if (host.isNotBlank() && attemptWs(host, port, "lan")) { awaitDrop(); continue }
+            if (pairFailure) return
+            // The remembered home-router door: fully direct from anywhere,
+            // nothing in the path but the user's own hardware.
+            val knownHost = endpointHost
+            val knownPort = endpointPort
+            if (knownHost.isNotBlank() && knownPort > 0
+                && attemptWs(knownHost, knownPort, "remote")) { awaitDrop(); continue }
             if (pairFailure) return
             // A hand-typed secret that isn't 64 hex chars would throw inside
             // HKDF; gate on shape, not just length, so a typo can't crash the
             // rung — it just skips Direct and lands on the honest state.
             if (hexSecret.matches(secret) && attemptDirect()) { awaitDrop(); continue }
+            if (pairFailure) return
+            // The failed punch still carried signaling — the Mac may have
+            // just taught us a door we didn't know a moment ago.
+            if ((endpointHost != knownHost || endpointPort != knownPort)
+                && endpointHost.isNotBlank() && endpointPort > 0
+                && attemptWs(endpointHost, endpointPort, "remote")) { awaitDrop(); continue }
             if (pairFailure) return
             state.value = ConnState.Unreachable("Mac unreachable — Telegram still works")
             delay(5000)
@@ -138,14 +158,15 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         events.tryEmit(parsed)
     }
 
-    // Rung one: the plain websocket, when the Mac is a room away.
-    private suspend fun attemptLan(): Boolean {
+    // The plain websocket rung, aimed wherever the Mac can be reached —
+    // a room away on the LAN, or across the world through its own router.
+    private suspend fun attemptWs(toHost: String, toPort: Int, label: String): Boolean {
         val ready = CompletableDeferred<Boolean>()
         val drop = CompletableDeferred<String>()
-        val request = Request.Builder().url("ws://$host:$port").build()
+        val request = Request.Builder().url("ws://$toHost:$toPort").build()
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                via = "lan"
+                via = label
                 webSocket.send(buildJsonObject {
                     put("type", JsonPrimitive("auth"))
                     put("token", JsonPrimitive(token))
@@ -204,6 +225,12 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             })
         direct = link
         dropped = drop
+        link.onEndpoint = { learnedHost, learnedPort ->
+            endpointHost = learnedHost
+            endpointPort = learnedPort
+            prefs.endpointHost = learnedHost
+            prefs.endpointPort = learnedPort
+        }
         link.onFileResponse = { whole ->
             val reqId = whole.meta.str("reqId")
             val waiter = synchronized(fileWaiters) { reqId?.let { fileWaiters.remove(it) } }
@@ -216,7 +243,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     }
 
     private fun sendRaw(text: String): Boolean = when (via) {
-        "lan" -> lanSocket?.send(text) ?: false
+        "lan", "remote" -> lanSocket?.send(text) ?: false
         "direct" -> direct?.sendText(text) ?: false
         else -> false
     }
@@ -224,10 +251,14 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     fun send(payload: JsonObject): Boolean = sendRaw(payload.toString())
 
     fun sendBinary(bytes: ByteArray): Boolean = when (via) {
-        "lan" -> lanSocket?.send(bytes.toByteString()) ?: false
+        "lan", "remote" -> lanSocket?.send(bytes.toByteString()) ?: false
         "direct" -> direct?.sendWsBinary(bytes) ?: false
         else -> false
     }
+
+    // The file lane's HTTP goes wherever the websocket went.
+    private fun httpHost(): String = if (via == "remote") endpointHost else host
+    private fun httpPort(): Int = if (via == "remote") endpointPort else port
 
     // The file lane rides HTTP on the LAN and framed channel messages when
     // punched through — same daemon routes, same caps, either way.
@@ -245,7 +276,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                     ?: throw IllegalStateException("malformed reply")
             } else {
                 val request = Request.Builder()
-                    .url("http://$host:$port/files")
+                    .url("http://${httpHost()}:${httpPort()}/files")
                     .header("Authorization", "Bearer $token")
                     .header("x-filename", android.net.Uri.encode(name))
                     .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
@@ -273,7 +304,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                     bytes = whole.body)
             } else {
                 val request = Request.Builder()
-                    .url("http://$host:$port/files/$id")
+                    .url("http://${httpHost()}:${httpPort()}/files/$id")
                     .header("Authorization", "Bearer $token")
                     .build()
                 client.newCall(request).execute().use { response ->
