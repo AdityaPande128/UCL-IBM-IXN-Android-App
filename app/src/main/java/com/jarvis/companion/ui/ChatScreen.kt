@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -138,13 +139,20 @@ fun ChatScreen(
                             maxLines = 1,
                             color = if (active) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurface,
+                            fontWeight = if (active) androidx.compose.ui.text.font.FontWeight.SemiBold
+                            else androidx.compose.ui.text.font.FontWeight.Normal,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                    else androidx.compose.ui.graphics.Color.Transparent)
                                 .clickable {
                                     vm.selectConversation(convo.id)
                                     scope.launch { drawer.close() }
                                 }
-                                .padding(horizontal = 18.dp, vertical = 12.dp))
+                                .padding(horizontal = 10.dp, vertical = 12.dp))
                     }
                 }
                 Row(
@@ -182,9 +190,12 @@ fun ChatScreen(
             },
             containerColor = MaterialTheme.colorScheme.background
         ) { padding ->
+            // The keyboard must never sit on top of the input row: this pads
+            // the column up by exactly the IME's height while it is open.
             Column(modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)) {
+                .padding(padding)
+                .imePadding()) {
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
@@ -229,7 +240,7 @@ fun ChatScreen(
                                 OutlinedButton(onClick = { vm.approve(asking.id, false) },
                                     modifier = Modifier.padding(start = 10.dp)) { Text("No") }
                             }
-                            Text("…or hold the mic and say yes or no.",
+                            Text("…or tap the mic and say yes or no.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 8.dp))
@@ -276,17 +287,20 @@ fun ChatScreen(
                             .background(
                                 if (vm.recording.value) MaterialTheme.colorScheme.error
                                 else MaterialTheme.colorScheme.surface)
-                            .pointerInput(micGranted) {
-                                detectTapGestures(onPress = {
-                                    if (!micGranted) { onNeedMic(); return@detectTapGestures }
-                                    if (!vm.startRecording()) return@detectTapGestures
-                                    val released = tryAwaitRelease()
-                                    vm.stopRecording(send = released)
-                                })
+                            // Tap starts, tap again sends — the Mac's rhythm,
+                            // no thumb held hostage while you speak.
+                            .clickable {
+                                when {
+                                    !micGranted -> onNeedMic()
+                                    vm.recording.value -> vm.stopRecording(send = true)
+                                    else -> vm.startRecording()
+                                }
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Filled.Mic, contentDescription = "Hold to talk",
+                        Icon(
+                            if (vm.recording.value) Icons.Filled.Stop else Icons.Filled.Mic,
+                            contentDescription = if (vm.recording.value) "Tap to send" else "Tap to talk",
                             tint = if (vm.recording.value) MaterialTheme.colorScheme.onError
                             else MaterialTheme.colorScheme.primary)
                     }

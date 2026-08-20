@@ -120,6 +120,13 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
                 macName.value = profile.str("name") ?: ""
                 currentVoice.value = profile.obj("voice")?.str("voice") ?: "af_heart"
             }
+            // Another surface changed the shared profile; this one follows.
+            "profile_changed" -> {
+                val profile = event.obj("profile") ?: return
+                profile.str("theme")?.let { macTheme.value = it }
+                profile.str("name")?.let { macName.value = it }
+                profile.obj("voice")?.str("voice")?.let { currentVoice.value = it }
+            }
             "conversations_result" -> {
                 conversations.clear()
                 event.arr("conversations")?.forEach { row ->

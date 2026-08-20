@@ -52,6 +52,9 @@ class MainActivity : FragmentActivity() {
 
     private val locked = mutableStateOf(false)
     private val micGranted = mutableStateOf(false)
+    // Leaving for our own picker or scanner is not leaving the app: the lock
+    // must not slam shut on the way back from choosing a file.
+    private var expectingReturn = false
     private val scannedPayload = mutableStateOf<String?>(null)
     // Mirrors prefs.onboarded as observable state: a plain property read
     // inside setContent never invalidates the composition that read it.
@@ -67,10 +70,12 @@ class MainActivity : FragmentActivity() {
         micLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()) { micGranted.value = it }
         scanLauncher = registerForActivityResult(ScanContract()) { result ->
+            expectingReturn = false
             scannedPayload.value = result.contents
         }
         pickLauncher = registerForActivityResult(
             ActivityResultContracts.OpenDocument()) { uri ->
+            expectingReturn = false
             if (uri != null) vm.upload(uri)
         }
 
@@ -118,6 +123,7 @@ class MainActivity : FragmentActivity() {
                         micGranted = micGranted.value,
                         onNeedMic = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) },
                         onAttach = {
+                            expectingReturn = true
                             pickLauncher.launch(arrayOf(
                                 "application/pdf", "image/*", "text/*",
                                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
@@ -130,7 +136,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (prefs.lockEnabled) locked.value = true
+        if (prefs.lockEnabled && !expectingReturn) locked.value = true
     }
 
     private fun canUseLock(): Boolean =
@@ -138,6 +144,7 @@ class MainActivity : FragmentActivity() {
             BIOMETRIC_WEAK or DEVICE_CREDENTIAL) == BiometricManager.BIOMETRIC_SUCCESS
 
     private fun launchScan() {
+        expectingReturn = true
         scanLauncher.launch(ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             .setPrompt("Point at the pairing code on your Mac")
