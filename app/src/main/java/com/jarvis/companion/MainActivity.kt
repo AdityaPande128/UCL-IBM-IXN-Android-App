@@ -105,10 +105,12 @@ class MainActivity : FragmentActivity() {
                         vm = vm, prefs = prefs, themePref = themePref,
                         canLock = canUseLock(),
                         onBack = { screen = "chat" },
-                        onRePair = {
+                        onSignOut = {
+                            // Total wipe: pairing, settings, transcript — back
+                            // to the very first onboarding screen.
                             vm.shutdown()
                             sharedModel = null
-                            prefs.forgetPairing()
+                            prefs.wipe()
                             recreate()
                         })
                     else -> ChatScreen(
@@ -138,8 +140,9 @@ class MainActivity : FragmentActivity() {
     private fun launchScan() {
         scanLauncher.launch(ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            .setPrompt("Scan the pairing code on your Mac")
+            .setPrompt("Point at the pairing code on your Mac")
             .setBeepEnabled(false)
+            .setCaptureActivity(PortraitCaptureActivity::class.java)
             .setOrientationLocked(true))
     }
 

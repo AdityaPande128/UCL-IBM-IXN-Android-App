@@ -53,4 +53,10 @@ class Prefs(context: Context) {
         store.edit().remove("host").remove("port").remove("token").remove("secret")
             .remove("turn").putBoolean("onboarded", false).apply()
     }
+
+    // Sign-out is total: pairing, settings, everything — the phone returns
+    // to the state it was in before it ever met a Mac.
+    fun wipe() {
+        store.edit().clear().apply()
+    }
 }

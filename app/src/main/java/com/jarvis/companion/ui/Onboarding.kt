@@ -2,6 +2,10 @@ package com.jarvis.companion.ui
 
 import android.net.Uri
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,7 +21,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -40,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -104,8 +111,9 @@ suspend fun trialConnect(context: android.content.Context, target: PairTarget): 
             is com.jarvis.companion.net.ConnState.Live -> null
             is com.jarvis.companion.net.ConnState.PairRequired -> "The Mac refused this token."
             is com.jarvis.companion.net.ConnState.Unreachable ->
-                "Could not reach the Mac on Wi-Fi or by hole punch. Is it awake?"
-            else -> "Timed out. Is the Mac awake?"
+                "Couldn't reach your Mac. Check it's awake with Jarvis open — " +
+                    "the same network is the surest path."
+            else -> "Timed out. Is your Mac awake with Jarvis open?"
         }
     } finally {
         probe.stop()
@@ -125,16 +133,38 @@ fun OnboardingFlow(
     onDone: () -> Unit
 ) {
     var step by remember { mutableStateOf(if (prefs.paired) "theme" else "pair") }
+    var pendingTarget by remember { mutableStateOf<PairTarget?>(null) }
+    var pairError by remember { mutableStateOf<String?>(null) }
     // Once paired, the wizard can already talk to the Mac: the theme step's
     // "Match my Mac" and the hello's name both come from the live profile.
-    LaunchedEffect(step) { if (step != "pair") vm.connect() }
+    LaunchedEffect(step) { if (step != "pair" && step != "connecting") vm.connect() }
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
         when (step) {
-            "pair" -> PairStep(prefs, onScanRequest, scannedPayload) { step = "theme" }
+            "pair" -> PairStep(prefs, pairError, onScanRequest, scannedPayload,
+                onInvalid = { pairError = it },
+                onTarget = { target ->
+                    pairError = null
+                    pendingTarget = target
+                    step = "connecting"
+                })
+            "connecting" -> ConnectingStep(pendingTarget ?: return@Box) { failure ->
+                val target = pendingTarget ?: return@ConnectingStep
+                if (failure == null) {
+                    prefs.host = target.host
+                    prefs.port = target.port
+                    prefs.token = target.token
+                    prefs.secret = target.secret
+                    prefs.turn = target.turn
+                    step = "theme"
+                } else {
+                    pairError = failure
+                    step = "pair"
+                }
+            }
             "theme" -> ThemeStep(prefs, themePref) { step = "lock" }
             "lock" -> LockStep(prefs, canLock, onTryLock) { step = "hello" }
             "hello" -> HelloStep(vm) { onDone() }
@@ -164,78 +194,124 @@ private fun StepFrame(title: String, sub: String, content: @Composable () -> Uni
 @Composable
 private fun PairStep(
     prefs: Prefs,
+    error: String?,
     onScanRequest: () -> Unit,
     scannedPayload: MutableState<String?>,
-    onNext: () -> Unit
+    onInvalid: (String) -> Unit,
+    onTarget: (PairTarget) -> Unit
 ) {
+    var manual by remember { mutableStateOf(false) }
     var host by remember { mutableStateOf(prefs.host) }
     var port by remember { mutableStateOf(prefs.port.toString()) }
     var token by remember { mutableStateOf(prefs.token) }
     var secret by remember { mutableStateOf(prefs.secret) }
-    // Rides the QR invisibly: relay addresses are configuration, not something
-    // anyone should ever type on a phone.
-    var turn by remember { mutableStateOf(prefs.turn) }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var checking by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
 
     LaunchedEffect(scannedPayload.value) {
         val raw = scannedPayload.value ?: return@LaunchedEffect
         scannedPayload.value = null
         val target = parsePairPayload(raw)
-        if (target == null) { error = "That code isn't a Jarvis pairing code."; return@LaunchedEffect }
-        host = target.host; port = target.port.toString(); token = target.token
-        secret = target.secret
-        turn = target.turn
+        if (target == null) onInvalid("That code isn't a Jarvis pairing code — try again.")
+        else onTarget(target)
     }
 
-    StepFrame("Pair with your Mac",
-        "Run the pairing command on the Mac and scan the code, or type the details.") {
-        Button(onClick = onScanRequest, modifier = Modifier.fillMaxWidth()) {
+    StepFrame("Pair with Your Mac", "Don't have Jarvis? Get the Mac App!") {
+        InstructionRow("1", "Open Jarvis on your Mac.")
+        InstructionRow("2", "Bring up the pairing code (Terminal: pair-phone).")
+        InstructionRow("3", "Scan it with this phone.")
+        Text("Please make sure both devices are on the same network.",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(top = 16.dp))
+        Button(onClick = onScanRequest,
+            modifier = Modifier.fillMaxWidth().padding(top = 22.dp)) {
             Text("Scan pairing code")
         }
-        OutlinedTextField(value = host, onValueChange = { host = it },
-            label = { Text("Host (tailnet name or IP)") },
-            singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 18.dp))
-        OutlinedTextField(value = port, onValueChange = { port = it.filter(Char::isDigit) },
-            label = { Text("Port") },
-            singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-        OutlinedTextField(value = token, onValueChange = { token = it.trim() },
-            label = { Text("Pairing token") },
-            singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
-        OutlinedTextField(value = secret, onValueChange = { secret = it.trim() },
-            label = { Text("Direct secret (for away-from-home)") },
-            singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
         if (error != null) {
-            Text(error!!, color = MaterialTheme.colorScheme.error,
+            Text(error, color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 10.dp))
+                modifier = Modifier.padding(top = 12.dp))
         }
-        Row(modifier = Modifier.padding(top = 20.dp),
-            verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = { manual = !manual },
+            modifier = Modifier.padding(top = 6.dp)) {
+            Text(if (manual) "Hide manual entry" else "Enter details manually")
+        }
+        if (manual) {
+            OutlinedTextField(value = host, onValueChange = { host = it },
+                label = { Text("Host (IP address)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
+            OutlinedTextField(value = port, onValueChange = { port = it.filter(Char::isDigit) },
+                label = { Text("Port") },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+            OutlinedTextField(value = token, onValueChange = { token = it.trim() },
+                label = { Text("Pairing token") },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+            OutlinedTextField(value = secret, onValueChange = { secret = it.trim() },
+                label = { Text("Direct secret (for away-from-home)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
             Button(
-                enabled = !checking && host.isNotBlank() && token.isNotBlank(),
+                enabled = host.isNotBlank() && token.isNotBlank(),
                 onClick = {
-                    checking = true; error = null
-                    scope.launch {
-                        val target = PairTarget(host.trim(), port.toIntOrNull() ?: 8080,
-                            token, secret, turn)
-                        val failure = trialConnect(context, target)
-                        checking = false
-                        if (failure != null) { error = failure; return@launch }
-                        prefs.host = target.host
-                        prefs.port = target.port
-                        prefs.token = target.token
-                        prefs.secret = target.secret
-                        prefs.turn = target.turn
-                        onNext()
-                    }
-                }) { Text(if (checking) "Checking…" else "Connect") }
-            if (checking) CircularProgressIndicator(
-                modifier = Modifier.padding(start = 14.dp).width(22.dp).height(22.dp),
-                strokeWidth = 2.dp)
+                    onTarget(PairTarget(host.trim(), port.toIntOrNull() ?: 8080,
+                        token, secret, prefs.turn))
+                },
+                modifier = Modifier.padding(top = 16.dp)) { Text("Connect") }
         }
+    }
+}
+
+@Composable
+private fun InstructionRow(step: String, text: String) {
+    Row(modifier = Modifier.padding(vertical = 5.dp), verticalAlignment = Alignment.Top) {
+        Text(step, fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.bodyMedium)
+        Text(text, style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
+// Scan done, details hidden: just a breathing ring while the ladder climbs —
+// Wi-Fi first, then the punch straight home.
+@Composable
+private fun ConnectingStep(target: PairTarget, onResult: (String?) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val pulse = rememberInfiniteTransition(label = "pulse")
+    val scale by pulse.animateFloat(0.82f, 1.06f,
+        infiniteRepeatable(tween(950), RepeatMode.Reverse), label = "scale")
+    val glow by pulse.animateFloat(0.35f, 1f,
+        infiniteRepeatable(tween(950), RepeatMode.Reverse), label = "glow")
+    var line by remember { mutableStateOf("Looking for your Mac…") }
+    LaunchedEffect(target) {
+        launch {
+            kotlinx.coroutines.delay(8000)
+            line = "Reaching across the internet…"
+            kotlinx.coroutines.delay(12000)
+            line = "Still trying — hold on…"
+        }
+        onResult(trialConnect(context, target))
+    }
+    Column(
+        modifier = Modifier.fillMaxSize().padding(28.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .size(96.dp)
+                .scale(scale)
+                .alpha(glow)
+                .border(3.dp, MaterialTheme.colorScheme.primary, CircleShape))
+        Text("Connecting…",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(top = 30.dp))
+        Text(line,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp))
     }
 }
 

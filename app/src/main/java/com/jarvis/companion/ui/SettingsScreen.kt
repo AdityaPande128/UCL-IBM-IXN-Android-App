@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -19,6 +20,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -42,10 +44,11 @@ fun SettingsScreen(
     themePref: MutableState<String>,
     canLock: Boolean,
     onBack: () -> Unit,
-    onRePair: () -> Unit
+    onSignOut: () -> Unit
 ) {
     var lockOn by remember { mutableStateOf(prefs.lockEnabled) }
     var speakOn by remember { mutableStateOf(prefs.speakReplies) }
+    var confirmSignOut by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -127,12 +130,29 @@ fun SettingsScreen(
                 "Models, hardware tiers, “Hey Jarvis”, permissions and memory "
                     + "live in the Mac app — they are the laptop’s business.")
 
-            Section("Pairing", "Forget this Mac and pair again from scratch.")
-            OutlinedButton(onClick = onRePair,
+            Section("Profile",
+                "Signed in to " + vm.macName.value.trim().ifBlank { prefs.host } + "'s Mac.")
+            OutlinedButton(onClick = { confirmSignOut = true },
                 modifier = Modifier.padding(top = 4.dp, bottom = 40.dp)) {
-                Text("Re-pair with a Mac", color = MaterialTheme.colorScheme.error)
+                Text("Sign out", color = MaterialTheme.colorScheme.error)
             }
         }
+    }
+
+    if (confirmSignOut) {
+        AlertDialog(
+            onDismissRequest = { confirmSignOut = false },
+            title = { Text("Sign out of this Mac?") },
+            text = { Text("This wipes every chat, setting and the pairing from this phone, "
+                + "and takes you back to the start. Your Mac keeps everything.") },
+            confirmButton = {
+                TextButton(onClick = { confirmSignOut = false; onSignOut() }) {
+                    Text("Sign out", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") }
+            })
     }
 }
 
