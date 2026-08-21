@@ -180,6 +180,11 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         val seenBin = if (sealed) HashMap<String, Long>() else null
         val request = Request.Builder().url("ws://$toHost:$toPort").build()
         val socket = client.newWebSocket(request, object : WebSocketListener() {
+            // On the sealed rung a 4401 proves nothing until this peer has
+            // opened at least one envelope: a stale endpoint may now point
+            // at a stranger's daemon, and a stranger must not be able to
+            // convince this phone its own pairing died.
+            private var sawSealedReply = false
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 via = label
                 sealKey = key
@@ -196,7 +201,10 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (key != null) {
-                    DirectCrypto.open(key, "phone", text)?.let { handleParsed(it) }
+                    DirectCrypto.open(key, "phone", text)?.let {
+                        sawSealedReply = true
+                        handleParsed(it)
+                    }
                 } else {
                     handleText(text)
                 }
@@ -206,6 +214,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                 if (key == null) { audio.tryEmit(bytes.toByteArray()); return }
                 val clear = DirectCrypto.openBinary(key, "mac", bytes.toByteArray(), seenBin)
                     ?: return
+                sawSealedReply = true
                 val whole = assembler?.accept(clear) ?: return
                 when (whole.tag) {
                     Frames.TAG_WS_BINARY -> audio.tryEmit(whole.body)
@@ -222,7 +231,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                 }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (code == 4401) {
+                if (code == 4401 && (!sealed || sawSealedReply)) {
                     pairFailure = true
                     wanted = false
                     state.value = ConnState.PairRequired("The Mac refused this pairing.")
