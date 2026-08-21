@@ -23,10 +23,13 @@ class Speaker(context: Context, scope: CoroutineScope) {
     private var track: AudioTrack? = null
     private var trackRate = 0
     private var focus: AudioFocusRequest? = null
+    // Barge-in: answering a question mid-sentence silences the rest of it.
+    @Volatile private var interrupted = false
 
     init {
         scope.launch(Dispatchers.IO) {
             for (wav in queue) {
+                if (interrupted) continue
                 val parsed = parseWav(wav) ?: continue
                 play(parsed)
                 if (queue.isEmpty) dropFocus()
@@ -35,7 +38,15 @@ class Speaker(context: Context, scope: CoroutineScope) {
     }
 
     fun enqueue(wav: ByteArray) {
+        interrupted = false
         queue.trySend(wav)
+    }
+
+    fun stop() {
+        interrupted = true
+        while (queue.tryReceive().isSuccess) { /* drain what was queued */ }
+        runCatching { track?.pause(); track?.flush() }
+        dropFocus()
     }
 
     private data class Pcm(val rate: Int, val channels: Int, val data: ByteArray, val offset: Int, val length: Int)
@@ -105,10 +116,10 @@ class Speaker(context: Context, scope: CoroutineScope) {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             trackRate = pcm.rate
-            track?.play()
         }
+        if (track?.playState != AudioTrack.PLAYSTATE_PLAYING) runCatching { track?.play() }
         var written = 0
-        while (written < pcm.length) {
+        while (written < pcm.length && !interrupted) {
             val n = track?.write(pcm.data, pcm.offset + written, pcm.length - written) ?: break
             if (n <= 0) break
             written += n

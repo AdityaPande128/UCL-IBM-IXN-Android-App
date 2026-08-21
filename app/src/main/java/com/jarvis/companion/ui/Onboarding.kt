@@ -127,6 +127,7 @@ fun OnboardingFlow(
     prefs: Prefs,
     themePref: MutableState<String>,
     canLock: Boolean,
+    lockEnrolled: MutableState<Boolean>,
     onScanRequest: () -> Unit,
     scannedPayload: MutableState<String?>,
     onTryLock: () -> Unit,
@@ -166,7 +167,7 @@ fun OnboardingFlow(
                 }
             }
             "theme" -> ThemeStep(prefs, themePref) { step = "lock" }
-            "lock" -> LockStep(prefs, canLock, onTryLock) { step = "hello" }
+            "lock" -> LockStep(prefs, canLock, lockEnrolled, onTryLock) { step = "hello" }
             "hello" -> HelloStep(vm) { onDone() }
         }
     }
@@ -346,27 +347,27 @@ private fun ThemeStep(prefs: Prefs, themePref: MutableState<String>, onNext: () 
     }
 }
 
+// One button, one decision: setting up the lock IS proving it works — the
+// prompt fires immediately, and success walks the wizard forward by itself.
 @Composable
-private fun LockStep(prefs: Prefs, canLock: Boolean, onTryLock: () -> Unit, onNext: () -> Unit) {
-    var enabled by remember { mutableStateOf(prefs.lockEnabled) }
+private fun LockStep(
+    prefs: Prefs,
+    canLock: Boolean,
+    enrolled: MutableState<Boolean>,
+    onTryLock: () -> Unit,
+    onNext: () -> Unit
+) {
+    LaunchedEffect(enrolled.value) { if (enrolled.value) onNext() }
     StepFrame("Protect the app",
-        if (canLock) "Ask for your fingerprint, face, or screen lock whenever Jarvis opens."
+        if (canLock) "Jarvis can ask for your fingerprint, face, or screen lock every time it opens."
         else "This phone has no screen lock set up; you can enable this later in Settings.") {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Switch(checked = enabled, enabled = canLock,
-                onCheckedChange = { enabled = it; prefs.lockEnabled = it })
-            Text("Require unlock", modifier = Modifier.padding(start = 12.dp),
-                color = MaterialTheme.colorScheme.onBackground)
+        Button(onClick = onTryLock, enabled = canLock,
+            modifier = Modifier.fillMaxWidth()) {
+            Text("Set up fingerprint or password lock")
         }
-        if (enabled) {
-            OutlinedButton(onClick = onTryLock, modifier = Modifier.padding(top = 14.dp)) {
-                Text("Try it now")
-            }
-        }
-        Row(modifier = Modifier.padding(top = 20.dp)) {
-            Button(onClick = onNext) { Text("Continue") }
-            TextButton(onClick = { enabled = false; prefs.lockEnabled = false; onNext() },
-                modifier = Modifier.padding(start = 10.dp)) { Text("Skip") }
+        TextButton(onClick = { prefs.lockEnabled = false; onNext() },
+            modifier = Modifier.padding(top = 8.dp)) {
+            Text("Skip")
         }
     }
 }

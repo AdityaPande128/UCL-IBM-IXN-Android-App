@@ -104,11 +104,22 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
         if (prefs.paired) conn.start(prefs.host, prefs.port, prefs.token, prefs.secret, prefs.turn)
     }
 
+    // Messages written while the link was down wait here and go out the
+    // moment it returns — nothing typed ever just sits and dies.
+    private val outbox = ArrayDeque<JsonObject>()
+
     private fun afterConnect() {
         if (prefs.speakReplies) conn.send(msg("speak_replies", "on" to true))
         conn.send(msg("onboarding"))
         conn.send(msg("conversations_list"))
         activeConversation.value?.let { conn.send(msg("conversation_select", "id" to it)) }
+        while (outbox.isNotEmpty()) {
+            val queued = outbox.first()
+            if (!conn.send(queued)) break
+            outbox.removeFirst()
+            busy.value = true
+            busyLine.value = "Thinking…"
+        }
     }
 
     private fun handle(event: JsonObject) {
@@ -188,7 +199,7 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
                 event.obj("proposal")?.let { setProposal(it) }
             }
             "stt_result" -> items.add(ChatItem(role = "user", text = event.str("text") ?: ""))
-            "proposal_taken" -> proposal.value = null
+            "proposal_taken" -> { proposal.value = null; speaker.stop() }
             "activity" -> {
                 val stage = event.str("stage") ?: event.str("event") ?: return
                 busyLine.value = describeActivity(event.str("source") ?: "", stage)
@@ -238,15 +249,23 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
         val ids = pendingUploads.map { it.id }
         items.add(ChatItem(role = "user", text = text,
             files = pendingUploads.map { FileRef(it.id, it.name, null) }))
-        conn.send(msg("intent", "text" to text,
-            "attachments" to (ids.ifEmpty { null })))
+        val payload = msg("intent", "text" to text,
+            "attachments" to (ids.ifEmpty { null }))
         pendingUploads.clear()
-        busy.value = true
-        busyLine.value = "Thinking…"
+        if (conn.send(payload)) {
+            busy.value = true
+            busyLine.value = "Thinking…"
+        } else {
+            outbox.add(payload)
+            busy.value = true
+            busyLine.value = "Waiting for the connection…"
+        }
     }
 
     fun approve(id: String, yes: Boolean) {
         proposal.value = null
+        // The decision outranks the question: stop reading it out.
+        speaker.stop()
         conn.send(msg("approval", "id" to id, "decision" to if (yes) "yes" else "no"))
     }
 

@@ -52,6 +52,9 @@ class MainActivity : FragmentActivity() {
 
     private val locked = mutableStateOf(false)
     private val micGranted = mutableStateOf(false)
+    // Flips when the onboarding enrolment prompt succeeds, so the wizard
+    // can move on by itself.
+    private val lockEnrolled = mutableStateOf(false)
     // Leaving for our own picker or scanner is not leaving the app: the lock
     // must not slam shut on the way back from choosing a file.
     private var expectingReturn = false
@@ -68,7 +71,12 @@ class MainActivity : FragmentActivity() {
         micGranted.value = ContextCompat.checkSelfPermission(
             this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         micLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestPermission()) { micGranted.value = it }
+            ActivityResultContracts.RequestPermission()) { granted ->
+            micGranted.value = granted
+            // The tap that asked for permission meant "start listening" —
+            // honour it the moment the system says yes.
+            if (granted) vm.startRecording()
+        }
         scanLauncher = registerForActivityResult(ScanContract()) { result ->
             expectingReturn = false
             scannedPayload.value = result.contents
@@ -96,6 +104,7 @@ class MainActivity : FragmentActivity() {
                         vm = vm, prefs = prefs,
                         themePref = themePref,
                         canLock = canUseLock(),
+                        lockEnrolled = lockEnrolled,
                         onScanRequest = { launchScan() },
                         scannedPayload = scannedPayload,
                         onTryLock = { promptUnlock(enrollProbe = true) },
@@ -159,7 +168,12 @@ class MainActivity : FragmentActivity() {
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(
                     result: BiometricPrompt.AuthenticationResult) {
-                    if (!enrollProbe) locked.value = false
+                    if (enrollProbe) {
+                        prefs.lockEnabled = true
+                        lockEnrolled.value = true
+                    } else {
+                        locked.value = false
+                    }
                 }
             })
         prompt.authenticate(BiometricPrompt.PromptInfo.Builder()
