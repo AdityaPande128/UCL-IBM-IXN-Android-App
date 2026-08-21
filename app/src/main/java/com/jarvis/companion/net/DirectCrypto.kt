@@ -67,20 +67,40 @@ object DirectCrypto {
         return byteArrayOf(1) + nonce + ts + cipher.doFinal(data)
     }
 
-    fun openBinary(key: ByteArray, from: String, buf: ByteArray): ByteArray? {
+    // The binary twin of open()'s replay guard: a nonce that already opened
+    // inside the window never opens twice. Callers without a seen map get
+    // window-only checking (the unit tests).
+    fun openBinary(
+        key: ByteArray, from: String, buf: ByteArray,
+        seen: MutableMap<String, Long>? = null
+    ): ByteArray? {
         if (buf.size < 1 + 12 + 8 + 16 || buf[0] != 1.toByte()) return null
         val nonce = buf.copyOfRange(1, 13)
         val ts = buf.copyOfRange(13, 21)
         val at = java.nio.ByteBuffer.wrap(ts).order(java.nio.ByteOrder.BIG_ENDIAN).long
         if (kotlin.math.abs(System.currentTimeMillis() - at) > WINDOW_MS) return null
-        return runCatching {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"),
-                GCMParameterSpec(128, nonce))
-            cipher.updateAAD(from.toByteArray(Charsets.UTF_8) + ts)
-            cipher.doFinal(buf.copyOfRange(21, buf.size))
-        }.getOrNull()
+        val marker = nonce.toBase64()
+        synchronized(seen ?: return decryptBinary(key, from, nonce, ts, buf)) {
+            if (seen.containsKey(marker)) return null
+        }
+        val clear = decryptBinary(key, from, nonce, ts, buf) ?: return null
+        synchronized(seen) {
+            seen[marker] = System.currentTimeMillis()
+            val cutoff = System.currentTimeMillis() - WINDOW_MS
+            seen.entries.removeAll { it.value < cutoff }
+        }
+        return clear
     }
+
+    private fun decryptBinary(
+        key: ByteArray, from: String, nonce: ByteArray, ts: ByteArray, buf: ByteArray
+    ): ByteArray? = runCatching {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"),
+            GCMParameterSpec(128, nonce))
+        cipher.updateAAD(from.toByteArray(Charsets.UTF_8) + ts)
+        cipher.doFinal(buf.copyOfRange(21, buf.size))
+    }.getOrNull()
 
     private fun deflateRaw(data: ByteArray): ByteArray {
         val deflater = Deflater(Deflater.DEFAULT_COMPRESSION, true)

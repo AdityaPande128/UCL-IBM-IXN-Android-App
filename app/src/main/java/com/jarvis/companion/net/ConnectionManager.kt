@@ -177,6 +177,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         val sealed = label == "remote"
         val key = if (sealed) DirectCrypto.remoteKeyFor(secret) else null
         val assembler = if (sealed) Frames.Assembler() else null
+        val seenBin = if (sealed) HashMap<String, Long>() else null
         val request = Request.Builder().url("ws://$toHost:$toPort").build()
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -203,7 +204,8 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (key == null) { audio.tryEmit(bytes.toByteArray()); return }
-                val clear = DirectCrypto.openBinary(key, "mac", bytes.toByteArray()) ?: return
+                val clear = DirectCrypto.openBinary(key, "mac", bytes.toByteArray(), seenBin)
+                    ?: return
                 val whole = assembler?.accept(clear) ?: return
                 when (whole.tag) {
                     Frames.TAG_WS_BINARY -> audio.tryEmit(whole.body)
