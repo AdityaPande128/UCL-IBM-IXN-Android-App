@@ -3,6 +3,7 @@ package com.jarvis.companion
 import com.jarvis.companion.net.DirectCrypto
 import com.jarvis.companion.net.Frames
 import com.jarvis.companion.net.str
+import com.jarvis.companion.net.toBase64
 import com.jarvis.companion.net.toHex
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -55,6 +56,52 @@ class DirectCryptoTest {
         assertEquals("v=0 round trip", opened?.str("sdp"))
         val tampered = sealed.replace("\"from\":\"phone\"", "\"from\":\"imposter\"")
         assertNull(DirectCrypto.open(key, "mac", tampered), "AAD binds the sender")
+    }
+
+    @Test
+    fun `the remote key and binary envelope match the daemon byte for byte`() {
+        assertEquals("ea0caf873be8104371102f25ab03bca882b65273db18dfe99919602926382103",
+            DirectCrypto.remoteKeyFor(secret).toHex())
+        // Encrypt with the daemon's fixed nonce and timestamp and demand the
+        // daemon's exact bytes — a byte of drift is silent field failure.
+        val key = DirectCrypto.remoteKeyFor(secret)
+        val nonce = ByteArray(12) { it.toByte() }
+        val ts = java.nio.ByteBuffer.allocate(8)
+            .order(java.nio.ByteOrder.BIG_ENDIAN).putLong(1755700000000L).array()
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,
+            javax.crypto.spec.SecretKeySpec(key, "AES"),
+            javax.crypto.spec.GCMParameterSpec(128, nonce))
+        cipher.updateAAD("mac".toByteArray(Charsets.UTF_8) + ts)
+        val envelope = byteArrayOf(1) + nonce + ts +
+            cipher.doFinal("sealed door".toByteArray(Charsets.UTF_8))
+        assertEquals("AQABAgMEBQYHCAkKCwAAAZjH3/UAzFQwSFH6esZo6kDlDhKYtQqZeQW9/zF03opd",
+            envelope.toBase64())
+    }
+
+    @Test
+    fun `binary envelopes round trip and refuse tampering and wrong senders`() {
+        val key = DirectCrypto.remoteKeyFor(secret)
+        val sealed = DirectCrypto.sealBinary(key, "phone", "round trip".toByteArray())
+        assertEquals("round trip",
+            DirectCrypto.openBinary(key, "phone", sealed)!!.decodeToString())
+        assertNull(DirectCrypto.openBinary(key, "mac", sealed), "AAD binds the sender")
+        val tampered = sealed.copyOf()
+        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0xff).toByte()
+        assertNull(DirectCrypto.openBinary(key, "phone", tampered))
+    }
+
+    @Test
+    fun `oversized text rides framed and reassembles whole`() {
+        val text = "x".repeat(200_000)
+        val frames = Frames.chunks(Frames.TAG_WS_TEXT,
+            kotlinx.serialization.json.buildJsonObject {
+                put("sid", JsonPrimitive(9)) }, text.toByteArray())
+        assertTrue(frames.size > 1)
+        val assembler = Frames.Assembler()
+        var whole: Frames.Whole? = null
+        for (frame in frames) whole = assembler.accept(frame) ?: whole
+        assertEquals(text, whole!!.body.decodeToString())
     }
 
     @Test

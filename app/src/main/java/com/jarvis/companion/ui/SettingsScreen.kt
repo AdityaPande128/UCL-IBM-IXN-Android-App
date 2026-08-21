@@ -43,6 +43,7 @@ fun SettingsScreen(
     prefs: Prefs,
     themePref: MutableState<String>,
     canLock: Boolean,
+    onLockChanged: () -> Unit = {},
     onBack: () -> Unit,
     onSignOut: () -> Unit
 ) {
@@ -94,7 +95,7 @@ fun SettingsScreen(
                 else "Set up a screen lock on this phone to enable this.")
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Switch(checked = lockOn, enabled = canLock, onCheckedChange = {
-                    lockOn = it; prefs.lockEnabled = it
+                    lockOn = it; prefs.lockEnabled = it; onLockChanged()
                 })
                 Text(if (lockOn) "On" else "Off",
                     modifier = Modifier.padding(start = 12.dp),

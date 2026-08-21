@@ -100,7 +100,9 @@ suspend fun trialConnect(context: android.content.Context, target: PairTarget): 
     val probe = com.jarvis.companion.net.ConnectionManager(scope, context.applicationContext)
     return try {
         probe.start(target.host, target.port, target.token, target.secret, target.turn)
-        val outcome = withTimeoutOrNull(30000) {
+        // The ladder's slowest honest climb is ~35s (LAN, door, then the
+        // punch); the trial must outwait it rather than call time first.
+        val outcome = withTimeoutOrNull(40000) {
             probe.state.first { state ->
                 state is com.jarvis.companion.net.ConnState.Live
                     || state is com.jarvis.companion.net.ConnState.PairRequired

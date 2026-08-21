@@ -141,6 +141,7 @@ class DirectLink(
                 val whole = assembler.accept(bytes) ?: return
                 when (whole.tag) {
                     Frames.TAG_WS_BINARY -> onBinary(whole.body)
+                    Frames.TAG_WS_TEXT -> onText(String(whole.body, Charsets.UTF_8))
                     Frames.TAG_FILE_RES -> onFileResponse?.invoke(whole)
                     else -> {}
                 }

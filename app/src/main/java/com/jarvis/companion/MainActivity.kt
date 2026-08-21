@@ -72,6 +72,9 @@ class MainActivity : FragmentActivity() {
             this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         micLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()) { granted ->
+            // Some OEMs stop the activity for the permission dialog; that
+            // is not leaving the app, and the lock must not slam.
+            expectingReturn = false
             micGranted.value = granted
             // The tap that asked for permission meant "start listening" —
             // honour it the moment the system says yes.
@@ -88,6 +91,7 @@ class MainActivity : FragmentActivity() {
         }
 
         locked.value = prefs.lockEnabled
+        applySecureFlag()
         ready.value = prefs.paired && prefs.onboarded
         if (ready.value) vm.connect()
 
@@ -118,6 +122,7 @@ class MainActivity : FragmentActivity() {
                     screen == "settings" -> SettingsScreen(
                         vm = vm, prefs = prefs, themePref = themePref,
                         canLock = canUseLock(),
+                        onLockChanged = { applySecureFlag() },
                         onBack = { screen = "chat" },
                         onSignOut = {
                             // Total wipe: pairing, settings, transcript — back
@@ -130,7 +135,10 @@ class MainActivity : FragmentActivity() {
                     else -> ChatScreen(
                         vm = vm,
                         micGranted = micGranted.value,
-                        onNeedMic = { micLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+                        onNeedMic = {
+                            expectingReturn = true
+                            micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        },
                         onAttach = {
                             expectingReturn = true
                             pickLauncher.launch(arrayOf(
@@ -146,6 +154,17 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         if (prefs.lockEnabled && !expectingReturn) locked.value = true
+    }
+
+    // A locked app must not leak its transcript through the recents
+    // thumbnail or a screenshot.
+    private fun applySecureFlag() {
+        if (prefs.lockEnabled) {
+            window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE,
+                android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
 
     private fun canUseLock(): Boolean =
@@ -171,6 +190,7 @@ class MainActivity : FragmentActivity() {
                     if (enrollProbe) {
                         prefs.lockEnabled = true
                         lockEnrolled.value = true
+                        applySecureFlag()
                     } else {
                         locked.value = false
                     }

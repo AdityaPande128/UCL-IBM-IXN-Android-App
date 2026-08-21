@@ -9,11 +9,15 @@ object Frames {
     const val TAG_WS_BINARY = 0x01
     const val TAG_FILE_REQ = 0x02
     const val TAG_FILE_RES = 0x03
+    const val TAG_WS_TEXT = 0x04
     const val CHUNK_BYTES = 64 * 1024
+    // The binary cap matches the plain websocket's frame limit; the file
+    // caps clear the HTTP lane's 50 MB so no rung strands a legal file.
     private val MAX_BYTES = mapOf(
-        TAG_WS_BINARY to 8 * 1024 * 1024,
-        TAG_FILE_REQ to 24 * 1024 * 1024,
-        TAG_FILE_RES to 24 * 1024 * 1024)
+        TAG_WS_BINARY to 32 * 1024 * 1024,
+        TAG_FILE_REQ to 52 * 1024 * 1024,
+        TAG_FILE_RES to 52 * 1024 * 1024,
+        TAG_WS_TEXT to 16 * 1024 * 1024)
 
     fun encode(tag: Int, header: String, payload: ByteArray, from: Int, len: Int): ByteArray {
         val head = header.toByteArray(Charsets.UTF_8)
@@ -31,7 +35,7 @@ object Frames {
         if (frame.size < 5) return null
         val buffer = ByteBuffer.wrap(frame)
         val tag = buffer.get().toInt() and 0xff
-        if (tag < 0x01 || tag > 0x03) return null
+        if (tag < 0x01 || tag > 0x04) return null
         val headLength = buffer.int
         if (headLength < 0 || headLength > 64 * 1024 || 5 + headLength > frame.size) return null
         val header = runCatching {

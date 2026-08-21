@@ -37,8 +37,14 @@ class Speaker(context: Context, scope: CoroutineScope) {
         }
     }
 
-    fun enqueue(wav: ByteArray) {
+    // A fresh utterance began on the Mac; chunks may play again. Arriving
+    // chunks alone never clear the interrupt — a silenced stream's stragglers
+    // stay silenced.
+    fun begin() {
         interrupted = false
+    }
+
+    fun enqueue(wav: ByteArray) {
         queue.trySend(wav)
     }
 
@@ -63,6 +69,7 @@ class Speaker(context: Context, scope: CoroutineScope) {
         while (at + 8 <= bytes.size) {
             val id = String(bytes, at, 4, Charsets.US_ASCII)
             val size = header.getInt(at + 4)
+            if (size < 0 || size > bytes.size) return null
             if (id == "data") {
                 val start = at + 8
                 val length = minOf(size, bytes.size - start)

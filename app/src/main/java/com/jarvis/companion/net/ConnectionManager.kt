@@ -70,6 +70,8 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private var lanSocket: WebSocket? = null
     private var direct: DirectLink? = null
     @Volatile private var via = ""
+    // The remote rung's sealing key, derived per attempt; null on plain rungs.
+    @Volatile private var sealKey: ByteArray? = null
     private var dropped: CompletableDeferred<String>? = null
     // Written from an OkHttp callback thread, read in the ladder coroutine.
     @Volatile private var pairFailure = false
@@ -104,6 +106,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         direct?.close()
         direct = null
         via = ""
+        sealKey = null
     }
 
     private val hexSecret = Regex("[0-9a-fA-F]{64}")
@@ -117,7 +120,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             // nothing in the path but the user's own hardware.
             val knownHost = endpointHost
             val knownPort = endpointPort
-            if (knownHost.isNotBlank() && knownPort > 0
+            if (hexSecret.matches(secret) && knownHost.isNotBlank() && knownPort > 0
                 && attemptWs(knownHost, knownPort, "remote")) { awaitDrop(); continue }
             if (pairFailure) return
             // A hand-typed secret that isn't 64 hex chars would throw inside
@@ -127,7 +130,8 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             if (pairFailure) return
             // The failed punch still carried signaling — the Mac may have
             // just taught us a door we didn't know a moment ago.
-            if ((endpointHost != knownHost || endpointPort != knownPort)
+            if (hexSecret.matches(secret)
+                && (endpointHost != knownHost || endpointPort != knownPort)
                 && endpointHost.isNotBlank() && endpointPort > 0
                 && attemptWs(endpointHost, endpointPort, "remote")) { awaitDrop(); continue }
             if (pairFailure) return
@@ -152,32 +156,68 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private fun handleText(text: String) {
         val parsed = runCatching { json.parseToJsonElement(text) as? JsonObject }
             .getOrNull() ?: return
+        handleParsed(parsed)
+    }
+
+    private fun handleParsed(parsed: JsonObject) {
         if (parsed["type"]?.jsonPrimitive?.contentOrNull == "connected" && via.isNotEmpty()) {
             state.value = ConnState.Live(via)
         }
         events.tryEmit(parsed)
     }
 
-    // The plain websocket rung, aimed wherever the Mac can be reached —
-    // a room away on the LAN, or across the world through its own router.
+    // The websocket rung, aimed wherever the Mac can be reached — a room
+    // away on the LAN, or across the world through its own router. The far
+    // door crosses the open internet, so on the "remote" rung every frame
+    // in both directions is sealed under the pairing secret — the token,
+    // the chats and the files travel only as ciphertext.
     private suspend fun attemptWs(toHost: String, toPort: Int, label: String): Boolean {
         val ready = CompletableDeferred<Boolean>()
         val drop = CompletableDeferred<String>()
+        val sealed = label == "remote"
+        val key = if (sealed) DirectCrypto.remoteKeyFor(secret) else null
+        val assembler = if (sealed) Frames.Assembler() else null
         val request = Request.Builder().url("ws://$toHost:$toPort").build()
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 via = label
-                webSocket.send(buildJsonObject {
+                sealKey = key
+                val auth = buildJsonObject {
                     put("type", JsonPrimitive("auth"))
                     put("token", JsonPrimitive(token))
-                }.toString())
+                }
+                if (key != null) {
+                    webSocket.send("{\"type\":\"seal\",\"v\":1}")
+                    webSocket.send(DirectCrypto.seal(key, "phone", auth))
+                } else {
+                    webSocket.send(auth.toString())
+                }
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleText(text)
+                if (key != null) {
+                    DirectCrypto.open(key, "phone", text)?.let { handleParsed(it) }
+                } else {
+                    handleText(text)
+                }
                 if (state.value is ConnState.Live) ready.complete(true)
             }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                audio.tryEmit(bytes.toByteArray())
+                if (key == null) { audio.tryEmit(bytes.toByteArray()); return }
+                val clear = DirectCrypto.openBinary(key, "mac", bytes.toByteArray()) ?: return
+                val whole = assembler?.accept(clear) ?: return
+                when (whole.tag) {
+                    Frames.TAG_WS_BINARY -> audio.tryEmit(whole.body)
+                    Frames.TAG_WS_TEXT -> runCatching {
+                        json.parseToJsonElement(String(whole.body, Charsets.UTF_8)) as? JsonObject
+                    }.getOrNull()?.let { handleParsed(it) }
+                    Frames.TAG_FILE_RES -> {
+                        val reqId = whole.meta.str("reqId")
+                        val waiter = synchronized(fileWaiters) {
+                            reqId?.let { fileWaiters.remove(it) }
+                        }
+                        waiter?.complete(whole)
+                    }
+                }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (code == 4401) {
@@ -243,7 +283,14 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     }
 
     private fun sendRaw(text: String): Boolean = when (via) {
-        "lan", "remote" -> lanSocket?.send(text) ?: false
+        "lan" -> lanSocket?.send(text) ?: false
+        "remote" -> {
+            val key = sealKey
+            val payload = runCatching {
+                json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+            if (key == null || payload == null) false
+            else lanSocket?.send(DirectCrypto.seal(key, "phone", payload)) ?: false
+        }
         "direct" -> direct?.sendText(text) ?: false
         else -> false
     }
@@ -251,20 +298,32 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     fun send(payload: JsonObject): Boolean = sendRaw(payload.toString())
 
     fun sendBinary(bytes: ByteArray): Boolean = when (via) {
-        "lan", "remote" -> lanSocket?.send(bytes.toByteString()) ?: false
+        "lan" -> lanSocket?.send(bytes.toByteString()) ?: false
+        "remote" -> sendSealedFrames(Frames.TAG_WS_BINARY, buildJsonObject { }, bytes)
         "direct" -> direct?.sendWsBinary(bytes) ?: false
         else -> false
     }
 
-    // The file lane's HTTP goes wherever the websocket went.
-    private fun httpHost(): String = if (via == "remote") endpointHost else host
-    private fun httpPort(): Int = if (via == "remote") endpointPort else port
+    private fun sendSealedFrames(tag: Int, meta: JsonObject, body: ByteArray): Boolean {
+        val key = sealKey ?: return false
+        val socket = lanSocket ?: return false
+        val stamped = buildJsonObject {
+            meta.forEach { (k, v) -> put(k, v) }
+            put("sid", JsonPrimitive(reqCounter.getAndIncrement().toInt()))
+        }
+        for (frame in Frames.chunks(tag, stamped, body)) {
+            if (!socket.send(DirectCrypto.sealBinary(key, "phone", frame).toByteString())) {
+                return false
+            }
+        }
+        return true
+    }
 
-    // The file lane rides HTTP on the LAN and framed channel messages when
-    // punched through — same daemon routes, same caps, either way.
+    // The file lane rides HTTP on the LAN and framed channel messages on
+    // every sealed or punched rung — same daemon routes, same caps.
     suspend fun uploadFile(name: String, bytes: ByteArray): JsonObject =
         withContext(Dispatchers.IO) {
-            if (via == "direct") {
+            if (via == "direct" || via == "remote") {
                 val whole = fileRoundTrip(buildJsonObject {
                     put("op", JsonPrimitive("put"))
                     put("name", JsonPrimitive(name))
@@ -276,7 +335,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                     ?: throw IllegalStateException("malformed reply")
             } else {
                 val request = Request.Builder()
-                    .url("http://${httpHost()}:${httpPort()}/files")
+                    .url("http://$host:$port/files")
                     .header("Authorization", "Bearer $token")
                     .header("x-filename", android.net.Uri.encode(name))
                     .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
@@ -292,7 +351,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
 
     suspend fun downloadFile(id: String, name: String): FetchedFile =
         withContext(Dispatchers.IO) {
-            if (via == "direct") {
+            if (via == "direct" || via == "remote") {
                 val whole = fileRoundTrip(buildJsonObject {
                     put("op", JsonPrimitive("get"))
                     put("id", JsonPrimitive(id))
@@ -304,7 +363,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                     bytes = whole.body)
             } else {
                 val request = Request.Builder()
-                    .url("http://${httpHost()}:${httpPort()}/files/$id")
+                    .url("http://$host:$port/files/$id")
                     .header("Authorization", "Bearer $token")
                     .build()
                 client.newCall(request).execute().use { response ->
@@ -318,7 +377,6 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         }
 
     private suspend fun fileRoundTrip(meta: JsonObject, body: ByteArray): Frames.Whole? {
-        val link = direct ?: return null
         val reqId = "r" + reqCounter.getAndIncrement()
         val waiter = CompletableDeferred<Frames.Whole>()
         synchronized(fileWaiters) { fileWaiters[reqId] = waiter }
@@ -326,7 +384,12 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             meta.forEach { (k, v) -> put(k, v) }
             put("reqId", JsonPrimitive(reqId))
         }
-        if (!link.sendFileRequest(stamped, body)) {
+        val dispatched = when (via) {
+            "direct" -> direct?.sendFileRequest(stamped, body) ?: false
+            "remote" -> sendSealedFrames(Frames.TAG_FILE_REQ, stamped, body)
+            else -> false
+        }
+        if (!dispatched) {
             synchronized(fileWaiters) { fileWaiters.remove(reqId) }
             return null
         }

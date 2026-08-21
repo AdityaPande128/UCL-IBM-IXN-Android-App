@@ -51,6 +51,37 @@ object DirectCrypto {
 
     fun keyFor(secretHex: String): ByteArray = derive(secretHex, "jarvis-direct/signal", 32)
 
+    // The home door's key: the same secret, a different corridor. Binary
+    // envelopes are compact — [1B v=1][12B nonce][8B BE ts ms][ct+tag],
+    // AAD = sender name then the timestamp bytes.
+    fun remoteKeyFor(secretHex: String): ByteArray = derive(secretHex, "jarvis-remote/ws", 32)
+
+    fun sealBinary(key: ByteArray, from: String, data: ByteArray): ByteArray {
+        val nonce = ByteArray(12).also { random.nextBytes(it) }
+        val ts = java.nio.ByteBuffer.allocate(8)
+            .order(java.nio.ByteOrder.BIG_ENDIAN)
+            .putLong(System.currentTimeMillis()).array()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+        cipher.updateAAD(from.toByteArray(Charsets.UTF_8) + ts)
+        return byteArrayOf(1) + nonce + ts + cipher.doFinal(data)
+    }
+
+    fun openBinary(key: ByteArray, from: String, buf: ByteArray): ByteArray? {
+        if (buf.size < 1 + 12 + 8 + 16 || buf[0] != 1.toByte()) return null
+        val nonce = buf.copyOfRange(1, 13)
+        val ts = buf.copyOfRange(13, 21)
+        val at = java.nio.ByteBuffer.wrap(ts).order(java.nio.ByteOrder.BIG_ENDIAN).long
+        if (kotlin.math.abs(System.currentTimeMillis() - at) > WINDOW_MS) return null
+        return runCatching {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"),
+                GCMParameterSpec(128, nonce))
+            cipher.updateAAD(from.toByteArray(Charsets.UTF_8) + ts)
+            cipher.doFinal(buf.copyOfRange(21, buf.size))
+        }.getOrNull()
+    }
+
     private fun deflateRaw(data: ByteArray): ByteArray {
         val deflater = Deflater(Deflater.DEFAULT_COMPRESSION, true)
         deflater.setInput(data); deflater.finish()

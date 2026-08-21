@@ -111,15 +111,19 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
     private fun afterConnect() {
         if (prefs.speakReplies) conn.send(msg("speak_replies", "on" to true))
         conn.send(msg("onboarding"))
-        conn.send(msg("conversations_list"))
-        activeConversation.value?.let { conn.send(msg("conversation_select", "id" to it)) }
+        // Flush before selecting: each queued message names its own chat, the
+        // daemon records it, and the snapshot that follows already shows it.
         while (outbox.isNotEmpty()) {
             val queued = outbox.first()
             if (!conn.send(queued)) break
             outbox.removeFirst()
-            busy.value = true
-            busyLine.value = "Thinking…"
+            if (queued.str("type") == "intent") {
+                busy.value = true
+                busyLine.value = "Thinking…"
+            }
         }
+        conn.send(msg("conversations_list"))
+        activeConversation.value?.let { conn.send(msg("conversation_select", "id" to it)) }
     }
 
     private fun handle(event: JsonObject) {
@@ -181,6 +185,13 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
                         appendRemote(event, id)
                     }
                     "proposal" -> event.obj("proposal")?.let { setProposal(it) }
+                    "deleted" -> {
+                        conversations.removeAll { it.id == id }
+                        if (activeConversation.value == id) {
+                            activeConversation.value = null
+                            items.clear()
+                        }
+                    }
                     "busy" -> if (activeConversation.value == id) {
                         busy.value = event.bool("busy") == true
                         if (busy.value) busyLine.value = "Working on another surface…"
@@ -192,13 +203,20 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
             "intent_result" -> {
                 busy.value = false
                 busyLine.value = ""
-                val text = event.str("response") ?: event.str("error") ?: "No response."
-                val role = if (event.str("status") == "error") "error" else "assistant"
-                items.add(ChatItem(role = role, text = text,
-                    files = artifactFiles(event.obj("artifacts"))))
+                // A reply born in another chat stays there; the store has it
+                // and switching back shows it. Only this chat's replies land
+                // in this transcript.
+                val home = event.int("conversation")
+                if (home == null || home == activeConversation.value) {
+                    val text = event.str("response") ?: event.str("error") ?: "No response."
+                    val role = if (event.str("status") == "error") "error" else "assistant"
+                    items.add(ChatItem(role = role, text = text,
+                        files = artifactFiles(event.obj("artifacts"))))
+                }
                 event.obj("proposal")?.let { setProposal(it) }
             }
             "stt_result" -> items.add(ChatItem(role = "user", text = event.str("text") ?: ""))
+            "speak_start" -> speaker.begin()
             "proposal_taken" -> { proposal.value = null; speaker.stop() }
             "activity" -> {
                 val stage = event.str("stage") ?: event.str("event") ?: return
@@ -250,7 +268,8 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
         items.add(ChatItem(role = "user", text = text,
             files = pendingUploads.map { FileRef(it.id, it.name, null) }))
         val payload = msg("intent", "text" to text,
-            "attachments" to (ids.ifEmpty { null }))
+            "attachments" to (ids.ifEmpty { null }),
+            "conversation" to activeConversation.value)
         pendingUploads.clear()
         if (conn.send(payload)) {
             busy.value = true
@@ -271,7 +290,9 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
 
     fun abort() {
         conn.send(msg("abort"))
+        outbox.clear()
         busy.value = false
+        busyLine.value = ""
     }
 
     fun newChat() {
@@ -291,11 +312,15 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
 
     fun setVoice(voice: String) {
         currentVoice.value = voice
-        conn.send(msg("profile_update", "voice" to buildJsonObject {
+        val payload = msg("profile_update", "voice" to buildJsonObject {
             put("enabled", JsonPrimitive(true))
             put("tts", JsonPrimitive(true))
             put("voice", JsonPrimitive(voice))
-        }))
+        })
+        if (!conn.send(payload)) {
+            outbox.add(payload)
+            toast.value = "Not connected — the voice change waits for the link."
+        }
     }
 
     fun startRecording(): Boolean {
@@ -308,9 +333,12 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
         val wav = recorder.stop()
         recording.value = false
         if (send && wav != null) {
-            conn.sendBinary(wav)
-            busy.value = true
-            busyLine.value = "Listening back…"
+            if (conn.sendBinary(wav)) {
+                busy.value = true
+                busyLine.value = "Listening back…"
+            } else {
+                toast.value = "No connection — the voice note wasn't sent."
+            }
         }
     }
 
@@ -335,8 +363,17 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
         }
     }
 
+    private val savedFiles = mutableMapOf<String, Uri?>()
+
     fun download(file: FileRef, open: Boolean) {
         val id = file.id ?: run { toast.value = "That file has no handle."; return }
+        // Already fetched this session: open it again, don't mint a copy.
+        if (savedFiles.containsKey(id)) {
+            val uri = savedFiles[id]
+            if (open && uri != null) openSaved(uri, file.name)
+            else toast.value = file.name + " is already in Downloads."
+            return
+        }
         scope.launch(Dispatchers.IO) {
             try {
                 val fetched = conn.downloadFile(id, file.name)
@@ -350,20 +387,25 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
                 }
                 val uri = saveToDownloads(file.name, fetched.mime, fetched.bytes)
                 withContext(Dispatchers.Main) {
+                    savedFiles[id] = uri
                     toast.value = "Saved " + file.name
                     if (open && uri != null && !fetched.mime.startsWith("image/")) {
-                        val view = Intent(Intent.ACTION_VIEW)
-                            .setDataAndType(uri, fetched.mime)
-                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                or Intent.FLAG_ACTIVITY_NEW_TASK)
-                        runCatching { app.startActivity(Intent.createChooser(view, file.name)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                        openSaved(uri, file.name)
                     }
                 }
             } catch (err: Exception) {
                 withContext(Dispatchers.Main) { toast.value = "Download failed: " + err.message }
             }
         }
+    }
+
+    private fun openSaved(uri: Uri, name: String) {
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, app.contentResolver.getType(uri) ?: "*/*")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                or Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { app.startActivity(Intent.createChooser(view, name)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
 
     private fun saveToDownloads(name: String, mime: String, bytes: ByteArray): Uri? {
@@ -386,7 +428,10 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
                 ?: return null
             val out = java.io.File(dir, name)
             out.writeBytes(bytes)
-            Uri.fromFile(out)
+            runCatching {
+                androidx.core.content.FileProvider.getUriForFile(
+                    app, app.packageName + ".files", out)
+            }.getOrNull()
         }
     }
 
