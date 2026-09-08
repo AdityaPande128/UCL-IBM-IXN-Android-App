@@ -154,6 +154,7 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         if (prefs.lockEnabled && !expectingReturn) locked.value = true
+        if (!expectingReturn) vm.endPrivateChat()
     }
 
     // A locked app must not leak its transcript through the recents

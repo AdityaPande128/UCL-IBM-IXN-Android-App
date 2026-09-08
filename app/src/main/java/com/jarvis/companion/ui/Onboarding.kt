@@ -252,8 +252,15 @@ private fun PairStep(
             OutlinedTextField(value = secret, onValueChange = { secret = it.trim() },
                 label = { Text("Direct secret (for away-from-home)") },
                 singleLine = true, modifier = Modifier.fillMaxWidth().padding(top = 10.dp))
+            val secretShape = secret.isBlank() || secret.matches(Regex("[0-9a-fA-F]{64}"))
+            if (!secretShape) {
+                Text("The direct secret is 64 hex characters; leave it blank to pair on Wi-Fi only.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 6.dp))
+            }
             Button(
-                enabled = host.isNotBlank() && token.isNotBlank(),
+                enabled = host.isNotBlank() && token.isNotBlank() && secretShape,
                 onClick = {
                     onTarget(PairTarget(host.trim(), port.toIntOrNull() ?: 8080,
                         token, secret, prefs.turn))

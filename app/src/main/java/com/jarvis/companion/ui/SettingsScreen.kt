@@ -128,7 +128,7 @@ fun SettingsScreen(
             }
 
             Section("On your Mac",
-                "Models, hardware tiers, “Hey Jarvis”, permissions and memory "
+                "Models, hardware tiers, “Hey Jarvis” and permissions "
                     + "live in the Mac app — they are the laptop’s business.")
 
             Section("Profile",

@@ -174,7 +174,13 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private suspend fun attemptWs(toHost: String, toPort: Int, label: String): Boolean {
         val ready = CompletableDeferred<Boolean>()
         val drop = CompletableDeferred<String>()
-        val sealed = label == "remote"
+        val sealed = secret.isNotBlank()
+        if (sealed && !hexSecret.matches(secret)) {
+            pairFailure = true
+            wanted = false
+            state.value = ConnState.PairRequired("The direct secret must be 64 hex characters.")
+            return false
+        }
         val key = if (sealed) DirectCrypto.remoteKeyFor(secret) else null
         val assembler = if (sealed) Frames.Assembler() else null
         val seenBin = if (sealed) HashMap<String, Long>() else null
@@ -334,7 +340,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     // every sealed or punched rung — same daemon routes, same caps.
     suspend fun uploadFile(name: String, bytes: ByteArray): JsonObject =
         withContext(Dispatchers.IO) {
-            if (via == "direct" || via == "remote") {
+            if (via == "direct" || sealKey != null) {
                 val whole = fileRoundTrip(buildJsonObject {
                     put("op", JsonPrimitive("put"))
                     put("name", JsonPrimitive(name))
@@ -362,7 +368,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
 
     suspend fun downloadFile(id: String, name: String): FetchedFile =
         withContext(Dispatchers.IO) {
-            if (via == "direct" || via == "remote") {
+            if (via == "direct" || sealKey != null) {
                 val whole = fileRoundTrip(buildJsonObject {
                     put("op", JsonPrimitive("get"))
                     put("id", JsonPrimitive(id))
@@ -395,9 +401,9 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             meta.forEach { (k, v) -> put(k, v) }
             put("reqId", JsonPrimitive(reqId))
         }
-        val dispatched = when (via) {
-            "direct" -> direct?.sendFileRequest(stamped, body) ?: false
-            "remote" -> sendSealedFrames(Frames.TAG_FILE_REQ, stamped, body)
+        val dispatched = when {
+            via == "direct" -> direct?.sendFileRequest(stamped, body) ?: false
+            sealKey != null -> sendSealedFrames(Frames.TAG_FILE_REQ, stamped, body)
             else -> false
         }
         if (!dispatched) {

@@ -67,6 +67,8 @@ val KOKORO_VOICES = listOf(
 // The phone's whole model of the world: one connection, one transcript, the
 // sidebar list, and whatever question Jarvis is currently asking. The Mac's
 // daemon stays the source of truth; this class just keeps up.
+private const val PRIVATE_BANNER = "Private mode: nothing you say here will be remembered."
+
 class ChatViewModel(private val app: Application, private val prefs: Prefs) {
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -77,6 +79,7 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
     val items = mutableStateListOf<ChatItem>()
     val conversations = mutableStateListOf<ConvRow>()
     val activeConversation = mutableStateOf<Int?>(null)
+    val privateChat = mutableStateOf(false)
     val proposal = mutableStateOf<ProposalUi?>(null)
     val busy = mutableStateOf(false)
     val busyLine = mutableStateOf("")
@@ -123,7 +126,8 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
             }
         }
         conn.send(msg("conversations_list"))
-        activeConversation.value?.let { conn.send(msg("conversation_select", "id" to it)) }
+        if (privateChat.value) conn.send(msg("private_chat", "on" to true))
+        else activeConversation.value?.let { conn.send(msg("conversation_select", "id" to it)) }
     }
 
     private fun handle(event: JsonObject) {
@@ -296,13 +300,31 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
     }
 
     fun newChat() {
+        endPrivateChat()
         activeConversation.value = null
         items.clear()
         conn.send(msg("conversation_select", "id" to null))
     }
 
     fun selectConversation(id: Int) {
+        endPrivateChat()
         conn.send(msg("conversation_select", "id" to id))
+    }
+
+    fun startPrivateChat() {
+        activeConversation.value = null
+        proposal.value = null
+        items.clear()
+        items.add(ChatItem(role = "system", text = PRIVATE_BANNER))
+        privateChat.value = true
+        conn.send(msg("private_chat", "on" to true))
+    }
+
+    fun endPrivateChat() {
+        if (!privateChat.value) return
+        privateChat.value = false
+        items.clear()
+        conn.send(msg("private_chat", "on" to false))
     }
 
     fun setSpeakReplies(on: Boolean) {

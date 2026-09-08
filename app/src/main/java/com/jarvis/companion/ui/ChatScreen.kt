@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
@@ -131,6 +132,20 @@ fun ChatScreen(
                         tint = MaterialTheme.colorScheme.primary)
                     Text("New chat", modifier = Modifier.padding(start = 10.dp))
                 }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            vm.startPrivateChat(); scope.launch { drawer.close() }
+                        }
+                        .padding(horizontal = 18.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.Lock, contentDescription = null,
+                        tint = if (vm.privateChat.value) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Private chat", modifier = Modifier.padding(start = 10.dp))
+                }
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(vm.conversations, key = { it.id }) { convo ->
                         val active = vm.activeConversation.value == convo.id
@@ -173,7 +188,7 @@ fun ChatScreen(
             topBar = {
                 TopAppBar(
                     title = {
-                        val title = vm.conversations
+                        val title = if (vm.privateChat.value) "Private chat" else vm.conversations
                             .find { it.id == vm.activeConversation.value }?.title ?: "Jarvis"
                         Text(title, maxLines = 1)
                     },
