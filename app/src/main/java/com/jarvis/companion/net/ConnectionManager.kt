@@ -116,6 +116,10 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
             state.value = ConnState.Connecting
             if (host.isNotBlank() && attemptWs(host, port, "lan")) { awaitDrop(); continue }
             if (pairFailure) return
+            val lanHost = prefs.lanHost
+            if (lanHost.isNotBlank() && lanHost != host
+                && attemptWs(lanHost, port, "lan")) { awaitDrop(); continue }
+            if (pairFailure) return
             // The remembered home-router door: fully direct from anywhere,
             // nothing in the path but the user's own hardware.
             val knownHost = endpointHost
@@ -162,6 +166,8 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     private fun handleParsed(parsed: JsonObject) {
         if (parsed["type"]?.jsonPrimitive?.contentOrNull == "connected" && via.isNotEmpty()) {
             state.value = ConnState.Live(via)
+            (parsed["lan"] as? JsonObject)?.get("host")?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it.isNotBlank() }?.let { prefs.lanHost = it }
         }
         events.tryEmit(parsed)
     }

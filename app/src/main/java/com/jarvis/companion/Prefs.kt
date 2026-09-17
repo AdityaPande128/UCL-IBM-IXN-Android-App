@@ -36,6 +36,12 @@ class Prefs(context: Context) {
         set(value) = store.edit().putString("turn", value).apply()
     // The home router's mapped door, learned over sealed signaling and kept
     // for the next time the Mac is far away.
+    // Where the Mac last said it was on the local network; tried right
+    // after the address it was paired at, so a Mac that changed Wi-Fi is
+    // still found a room away.
+    var lanHost: String
+        get() = store.getString("lan-host", "") ?: ""
+        set(value) = store.edit().putString("lan-host", value).apply()
     var endpointHost: String
         get() = store.getString("endpoint-host", "") ?: ""
         set(value) = store.edit().putString("endpoint-host", value).apply()
