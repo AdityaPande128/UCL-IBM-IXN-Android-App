@@ -101,7 +101,10 @@ fun ChatScreen(
     onAttach: () -> Unit,
     onSettings: () -> Unit
 ) {
-    val drawer = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
+    // The drawer is not saved across a recreate: the lock prompt and a
+    // return from the background rebuild this screen, and a drawer left
+    // open last time must not be the first thing the next open shows.
+    val drawer = remember { androidx.compose.material3.DrawerState(DrawerValue.Closed) }
     val scope = rememberCoroutineScope()
     val connState by vm.conn.state.collectAsState()
     val listState = rememberLazyListState()
