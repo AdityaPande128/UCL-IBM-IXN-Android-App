@@ -302,13 +302,24 @@ class ChatViewModel(private val app: Application, private val prefs: Prefs) {
     fun newChat() {
         endPrivateChat()
         activeConversation.value = null
+        proposal.value = null
         items.clear()
         conn.send(msg("conversation_select", "id" to null))
     }
 
+    // The tap answers on the phone at once: the chat becomes current here,
+    // and its messages arrive when the Mac replies. A link that is down
+    // says so, and afterConnect re-selects this chat the moment it returns.
     fun selectConversation(id: Int) {
         endPrivateChat()
-        conn.send(msg("conversation_select", "id" to id))
+        if (activeConversation.value != id) {
+            activeConversation.value = id
+            proposal.value = null
+            items.clear()
+        }
+        if (!conn.send(msg("conversation_select", "id" to id))) {
+            toast.value = "Not connected to your Mac yet — this chat opens when the link returns."
+        }
     }
 
     fun startPrivateChat() {

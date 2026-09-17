@@ -219,7 +219,7 @@ private fun PairStep(
 
     StepFrame("Pair with Your Mac", "Don't have Jarvis? Get the Mac App!") {
         InstructionRow("1", "Open Jarvis on your Mac.")
-        InstructionRow("2", "Bring up the pairing code (Terminal: pair-phone).")
+        InstructionRow("2", "In Settings, choose Phone, then Android: a pairing code appears.")
         InstructionRow("3", "Scan it with this phone.")
         Text("Please make sure both devices are on the same network.",
             style = MaterialTheme.typography.bodyMedium,
