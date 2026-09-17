@@ -305,14 +305,20 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
         return live
     }
 
+    // A socket that opened with the seal speaks sealed both ways, on the
+    // LAN rung as much as the far door: the daemon drops a plain frame on
+    // a sealed socket without a word, so a bare send here would auth fine
+    // and then never be heard again.
     private fun sendRaw(text: String): Boolean = when (via) {
-        "lan" -> lanSocket?.send(text) ?: false
-        "remote" -> {
+        "lan", "remote" -> {
             val key = sealKey
-            val payload = runCatching {
-                json.parseToJsonElement(text) as? JsonObject }.getOrNull()
-            if (key == null || payload == null) false
-            else lanSocket?.send(DirectCrypto.seal(key, "phone", payload)) ?: false
+            if (key == null) lanSocket?.send(text) ?: false
+            else {
+                val payload = runCatching {
+                    json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+                if (payload == null) false
+                else lanSocket?.send(DirectCrypto.seal(key, "phone", payload)) ?: false
+            }
         }
         "direct" -> direct?.sendText(text) ?: false
         else -> false
@@ -321,8 +327,9 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
     fun send(payload: JsonObject): Boolean = sendRaw(payload.toString())
 
     fun sendBinary(bytes: ByteArray): Boolean = when (via) {
-        "lan" -> lanSocket?.send(bytes.toByteString()) ?: false
-        "remote" -> sendSealedFrames(Frames.TAG_WS_BINARY, buildJsonObject { }, bytes)
+        "lan", "remote" ->
+            if (sealKey == null) lanSocket?.send(bytes.toByteString()) ?: false
+            else sendSealedFrames(Frames.TAG_WS_BINARY, buildJsonObject { }, bytes)
         "direct" -> direct?.sendWsBinary(bytes) ?: false
         else -> false
     }
