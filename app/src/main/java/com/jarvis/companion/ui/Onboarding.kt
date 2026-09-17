@@ -419,7 +419,7 @@ private fun HelloStep(vm: ChatViewModel, onDone: () -> Unit) {
                 .alpha(fade.value)
                 .blur(blur.value.dp))
         Spacer(modifier = Modifier.height(14.dp))
-        Text("Everything stays on your Mac.",
+        Text("Your personal AI assistant.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.alpha(subFade.value))
