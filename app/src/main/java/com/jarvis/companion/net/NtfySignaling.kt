@@ -19,8 +19,8 @@ import java.util.concurrent.TimeUnit
 class NtfySignaling(
     private val scope: CoroutineScope,
     secretHex: String,
-    private val onSignal: (JsonObject) -> Unit,
-    private val onUnreachable: () -> Unit = {}
+    private val onUnreachable: () -> Unit = {},
+    private val onSignal: (JsonObject) -> Unit
 ) {
     private val base = "https://ntfy.sh"
     private val topic = DirectCrypto.topicFor(secretHex)
