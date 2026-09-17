@@ -46,7 +46,7 @@ class DirectLink(
     private var channel: DataChannel? = null
     @Volatile private var alive = true
 
-    private val signaling = NtfySignaling(scope, secretHex) { signal ->
+    private val signaling = NtfySignaling(scope, secretHex, onUnreachable = { close() }) { signal ->
         when (signal.str("kind")) {
             "answer" -> signal.str("sdp")?.let { sdp ->
                 pc?.setRemoteDescription(sdpObserver,

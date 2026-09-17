@@ -140,7 +140,7 @@ class ConnectionManager(private val scope: CoroutineScope, private val appContex
                 && attemptWs(endpointHost, endpointPort, "remote")) { awaitDrop(); continue }
             if (pairFailure) return
             state.value = ConnState.Unreachable("Mac unreachable — Telegram still works")
-            delay(5000)
+            delay(2000)
         }
     }
 

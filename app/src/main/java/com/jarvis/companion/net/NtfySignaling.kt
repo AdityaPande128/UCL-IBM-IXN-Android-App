@@ -19,7 +19,8 @@ import java.util.concurrent.TimeUnit
 class NtfySignaling(
     private val scope: CoroutineScope,
     secretHex: String,
-    private val onSignal: (JsonObject) -> Unit
+    private val onSignal: (JsonObject) -> Unit,
+    private val onUnreachable: () -> Unit = {}
 ) {
     private val base = "https://ntfy.sh"
     private val topic = DirectCrypto.topicFor(secretHex)
@@ -69,7 +70,12 @@ class NtfySignaling(
                     .url("$base/$topic")
                     .post(body.toRequestBody("text/plain".toMediaType()))
                     .build()).execute().use { }
-            }.onFailure { android.util.Log.w("JarvisDirect", "publish failed: " + it.message) }
+            }.onFailure {
+                android.util.Log.w("JarvisDirect", "publish failed: " + it.message)
+                // The offer never left the phone, so nothing will ever answer
+                // it: say so now rather than waiting out the punch's timeout.
+                if (payload.str("kind") == "offer") onUnreachable()
+            }
         }
     }
 
